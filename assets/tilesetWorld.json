@@ -1,0 +1,14 @@
+{ "columns":16,
+ "image":"tilesetWorld.png",
+ "imageheight":128,
+ "imagewidth":128,
+ "margin":0,
+ "name":"tilesetWorld",
+ "spacing":0,
+ "tilecount":256,
+ "tiledversion":"2018.08.22",
+ "tileheight":8,
+ "tilewidth":8,
+ "type":"tileset",
+ "version":1.2
+}

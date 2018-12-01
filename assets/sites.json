@@ -1,0 +1,33 @@
+{
+    "sites": {
+        "Mason": {
+            "abilities": [
+                {"name": "Build", "nFollowers": 5, "nActions": 1},
+                {"name": "Build Sacrifice", "nFollowers": 3, "nActions": 1}
+            ]
+        },
+        "Church": {
+            "abilities": [
+                {"name": "Recruit", "nFollowers": 3, "nActions": 0}
+            ]
+        },
+        "Village Square": {
+            "abilities": [
+                {"name": "UpgradeTown", "nFollowers": 10, "nActions": 3}
+            ]
+        },
+        "Town Square": {
+            "abilities": [
+                {"name": "UpgradeTown", "nFollowers": 10, "nActions": 4}
+            ]
+        },
+        "City Square": {
+        },
+        "Dragon Statue": {
+            "abilities": [
+                {"name": "Sacrifice", "nFollowers": 2, "nActions": 0},
+                {"name": "SacrificeMage", "nFollowers": 1, "nMages": 1, "nActions": 0}
+            ]
+        }
+    }
+}
