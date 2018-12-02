@@ -73,32 +73,38 @@ proc richPrintLength*(text: string): int =
 proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool = false, step = -1) =
   ## prints but handles color codes <0>black <8>red etc <-> to return to normal
 
-  let tlen = richPrintLength(text)
-
+  var sx = x
   var x = x
-  let startColor = getColor()
-  var i = 0
-  var j = 0
-  while i < text.len:
-    if step != -1 and j >= step:
-      break
+  var y = y
 
-    let c = text[i]
-    if i + 2 < text.high and c == '<' and (text[i+2] == '>' or text[i+3] == '>'):
-      let colStr = if text[i+2] == '>': text[i+1..i+1] else: text[i+1..i+2]
-      let col = try: parseInt(colStr) except ValueError: startColor
-      setColor(col)
-      i += (if text[i+2] == '>': 3 else: 4)
-      continue
-    if shadow:
-      printShadow($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
-    else:
-      print($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
-    x += glyphWidth(c)
-    i += 1
-    if c != ' ':
-      j += 1
-  setColor(startColor)
+  for text in text.split('\n'):
+    let tlen = richPrintLength(text)
+
+    let startColor = getColor()
+    var i = 0
+    var j = 0
+    while i < text.len:
+      if step != -1 and j >= step:
+        break
+
+      let c = text[i]
+      if i + 2 < text.high and c == '<' and (text[i+2] == '>' or text[i+3] == '>'):
+        let colStr = if text[i+2] == '>': text[i+1..i+1] else: text[i+1..i+2]
+        let col = try: parseInt(colStr) except ValueError: startColor
+        setColor(col)
+        i += (if text[i+2] == '>': 3 else: 4)
+        continue
+      if shadow:
+        printShadow($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
+      else:
+        print($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
+      x += glyphWidth(c)
+      i += 1
+      if c != ' ':
+        j += 1
+    setColor(startColor)
+    y += fontHeight()
+    x = sx
 
 iterator safeIter*[T](a: seq[T]): T =
   let length = a.len

@@ -8,7 +8,7 @@ webr:
 	nim js $(NICO) -d:release -o:${APPNAME}.js src/main.nim
 
 rund:
-	nim c $(NICO) -r -d:debug -o:${APPNAME}d src/main.nim
+	nim c $(NICO) -d:gif -r -d:debug -o:${APPNAME}d src/main.nim
 
 run:
-	nim c $(NICO) -r -d:release -o:${APPNAME} src/main.nim
+	nim c $(NICO) -d:gif -r -d:release -o:${APPNAME} src/main.nim
