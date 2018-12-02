@@ -74,8 +74,8 @@ Capture nearby towns
 
 # CONSTANTS
 
-const teamColors = [7,18,8]
-const teamColors2 = [4,15,13]
+const teamColors = [7,18,28]
+const teamColors2 = [4,15,3]
 
 const townNames = @[
   "Atencia",
@@ -246,7 +246,6 @@ proc removeFollower(self: Site) =
       units.delete(i)
       newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
       return
-  echo "couldn't find follower to remove =("
 
 proc removeShaman(self: Site): Unit =
   for i,u in units:
@@ -342,6 +341,7 @@ proc getSickCount(self: Town): int =
 # GLOBALS
 var particles: seq[Particle]
 var time: float32
+var turn: int
 var frame: uint32
 var selectedSite: Site
 var homeTown: Town
@@ -358,6 +358,7 @@ var forcedLabour = false
 var towns: seq[Town]
 var armies: seq[Army]
 var pulling: bool
+var hoverUnitChangeTime: float32
 
 var areYouSure: bool
 var areYouSureMessage: string
@@ -458,7 +459,7 @@ let siteMedic = SiteSettings(name: "Healing Tent", actionsToBuild: 1, spr: 0, ab
 ])
 
 let siteSerpent = SiteSettings(name: "Serpent Totem", spr: 1, abilities: @[
-  SiteAbility(name: "Required Sacrifice", desc: "If no sacrifices, sickness spreads", startOfTurn: true, nActions: 0, action: proc(site: Site) =
+  SiteAbility(name: "Required Sacrifice", desc: "If no sacrifices\nsickness spreads", startOfTurn: true, nActions: 0, action: proc(site: Site) =
     if homeTown.serpentSacrificeMade == false:
       # pick a random follower and make them sick
       let nFollowers = site.town.getFollowerCount()
@@ -537,7 +538,7 @@ let siteBarracks = SiteSettings(name: "Barracks", desc: "Train soldiers", action
   abilityDemolish,
 ])
 
-let siteAltar = SiteSettings(name: "Altar", desc: "Motivate followers", actionsToBuild: 1, abilities: @[
+let siteAltar = SiteSettings(name: "Altar", desc: "Kill Followers for Actions", actionsToBuild: 1, abilities: @[
   SiteAbility(name: "Motivate", desc: "Sacrifice a follower at\nAltar for an extra action", nFollowers: 2, nActions: 0, action: proc(site: Site) =
     # kill 1 follower, gain 1 action
     site.removeFollower()
@@ -556,7 +557,7 @@ let siteGuild = SiteSettings(name: "Training Hut", desc: "Train powerful Shaman"
         u.flash = 5
         break
   ),
-  SiteAbility(name: "Train Shaman", desc: "Convert a Follower into a Shaman", nFollowers: 5, nShamans: 0, nActions: 2, action: proc(site: Site) =
+  SiteAbility(name: "Train Shaman", desc: "Convert 5 Followers into a Shaman", nFollowers: 5, nShamans: 0, nActions: 2, action: proc(site: Site) =
     for i in 0..<4:
       site.removeFollower()
     for u in site.units:
@@ -592,7 +593,7 @@ let siteObstacle = SiteSettings(name: "Slum", desc: "A filty obstacle", spr: 0, 
   ),
 ])
 
-let siteWatchtower = SiteSettings(name: "Watchtower", desc: "Supress Rebellion", spr: 0, actionsToBuild: 1, abilities: @[
+let siteWatchtower = SiteSettings(name: "Watchtower", desc: "Reduce Rebellion", spr: 0, actionsToBuild: 1, abilities: @[
   SiteAbility(name: "Supress Rebellion", desc: "Remove one Rebellion", nSoldiers: 3, nActions: 0, action: proc(site: Site) =
     site.town.rebellion = max(site.town.rebellion - 1, 0)
   ),
@@ -753,7 +754,7 @@ proc check(self: ShamanAbility, unit: Unit): bool =
     return false
   return true
 
-proc draw(self: SiteAbility, x, y, w, h: int, disabled: bool) =
+proc draw(self: SiteAbility, x, y, w, h: int, disabled: bool, site: Site) =
   var y = y
   var x = x
   hline(0, y - 5, w)
@@ -762,48 +763,73 @@ proc draw(self: SiteAbility, x, y, w, h: int, disabled: bool) =
     richPrint("(start turn)</> " & name, 10, y)
   elif disabled:
     setColor(25)
-    richPrint("<27>(" & $nActions & ")</> " & name & (if multiUse: " <27>multi-use" else: ""), 10, y)
+    richPrint("<27>(" & $nActions & ")</> " & name, 10, y)
   else:
     setColor(22)
-    richPrint("<8>(" & $nActions & ")</> " & name & (if multiUse: " <8>multi-use" else: ""), 10, y)
+    richPrint("<8>(" & $nActions & ")</> " & name, 10, y)
   y += 10
   x = 10
   var j = 0
+  let followerCount = site.getFollowerCount
+  let shamanCount = site.getShamanCount
+  let rebelCount = site.getRebelCount
+  let soldierCount = site.getSoldierCount
+  let sickCount = site.getSickCount
+
   for i in 0..<nFollowers:
+    if i > followerCount:
+      pal(1,27)
     spr(1, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
   for i in 0..<nShamans:
+    if i > shamanCount:
+      pal(1,27)
     spr(2, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
   for i in 0..<nRebels:
+    if i > rebelCount:
+      pal(1,27)
     spr(3, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
   for i in 0..<nSoldiers:
+    if i > soldierCount:
+      pal(1,27)
     spr(4, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
   for i in 0..<nSick:
+    if i > sickCount:
+      pal(1,27)
     spr(6, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
+
+  if multiUse:
+    setColor(8)
+    print("multi-use", x + 5, y)
 
   y += 10
   setColor(23)
@@ -974,6 +1000,11 @@ proc endTurn() =
           unit.kind = Sick
           unit.flash = 5
 
+    # cap site
+    for site in town.sites:
+      if site.units.len > 15:
+        site.units.setLen(15)
+
     # start of turn actiosn
     for site in town.sites:
       site.used = false
@@ -984,6 +1015,36 @@ proc endTurn() =
         if ab.startOfTurn:
           if ab.check(site):
             ab.action(site)
+
+  turn += 1
+
+  if turn mod 5 == 0:
+    # expand colonists
+    for town in towns:
+      if town.team == 2:
+        for n in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,1),(-1,1),(1,-1)]:
+          let t = mget(town.pos.x + n[0], town.pos.y + n[1])
+          if t in [2.uint8,3,4,5,6]:
+            mset(town.pos.x + n[0], town.pos.y + n[1], t + 32)
+
+    for y in 0..<mapHeight():
+      for x in 0..<mapWidth():
+        let t = mget(x,y)
+        if t in [34.uint8,35,36,37,38]:
+          for n in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,1),(-1,1),(1,-1)]:
+            for town in towns:
+              if town.team == 0 and town.pos.x == x + n[0] and town.pos.y == y + n[1]:
+                town.team = 2
+                break
+            let t2 = mget(x+n[0],y+n[1])
+            if t2 in [2.uint8,3,4,5,6]:
+              mset(x+n[0],y+n[1], t2 + 32 + 16)
+
+    for y in 0..<mapHeight():
+      for x in 0..<mapWidth():
+        let t = mget(x,y)
+        if t in [50.uint8,51,52,53,54]:
+          mset(x,y,t-16)
 
 proc tryEndTurn() =
   if homeTown.serpentSacrificeMade == false:
@@ -1041,6 +1102,10 @@ proc gameInit() =
   particles = @[]
   towns = @[]
   armies = @[]
+
+  turn = 1
+  time = 0.0
+  frame = 0
 
   for y in 0..<mapHeight():
     for x in 0..<mapWidth():
@@ -1121,20 +1186,24 @@ proc gameUpdate(dt: float32) =
       areYouSure = false
     return
 
-  time += dt
-  hoverUnit = nil
-  var hoverSite: Site = nil
-  var (mx,my) = mouse()
-
   if mousebtnp(2):
     undo()
     return
+
+  time += dt
+  var lastHoverUnit = hoverUnit
+  hoverUnit = nil
+  var hoverSite: Site = nil
+  var (mx,my) = mouse()
 
   if currentTown != nil:
     for site in currentTown.sites:
       for u in site.units:
         if u.hp <= 0:
           newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
+
+  for town in towns:
+    for site in town.sites:
       site.units.keepItIf(it.hp > 0)
 
   if currentTown != nil:
@@ -1152,6 +1221,9 @@ proc gameUpdate(dt: float32) =
           if mx >= u.pos.x - 1 and mx <= u.pos.x + 7 and my >= u.pos.y - 1 and my <= u.pos.y + 7:
             hoverUnit = u
             break
+
+  if hoverUnit != lastHoverUnit and hoverUnit != nil:
+    hoverUnitChangeTime = time
 
   if inputMode == SelectUnit:
     if mousebtnp(0):
@@ -1198,7 +1270,9 @@ proc gameUpdate(dt: float32) =
     var (mx,my) = mouse()
     # check which thing they clicked on
     if my > screenHeight - 30:
+        # bottom bar
       if mx > screenWidth div 4 * 3:
+        # right
         if inputMode == SelectSite:
           tryEndTurn()
           return
@@ -1207,8 +1281,8 @@ proc gameUpdate(dt: float32) =
           selectedSite.used = false
           inputMode = SelectSite
           return
-      else:
-        # bottom bar
+      elif mx > screenWidth div 4:
+        # mid
         if currentArmy != nil and inputMode == SelectSite and currentArmy.moved == false:
           inputMode = MoveArmy
           return
@@ -1227,6 +1301,8 @@ proc gameUpdate(dt: float32) =
                 u.sourceSite = site
             return
         elif inputMode == Relocate and placingUnits.len == 0:
+          if unitsMoved == 0:
+            currentTown.actions += 1
           inputMode = SelectSite
           return
     if mx < screenWidth div 4 and (inputMode == SelectSite or inputMode == Relocate or inputMode == MoveArmy):
@@ -1542,7 +1618,7 @@ proc gameDraw() =
 
     # Site abilities
     for k,ability in selectedSite.settings.abilities:
-      ability.draw(x, y, w, 50, ability.startOfTurn or ability.check(selectedSite) == false)
+      ability.draw(x, y, w, 50, ability.startOfTurn or ability.check(selectedSite) == false, selectedSite)
       y += 50
 
   setCamera()
@@ -1580,7 +1656,10 @@ proc gameDraw() =
       printc("Relocate any number of units", screenWidth div 2, screenHeight - 20)
     elif inputMode == Relocate and placingUnits.len == 0:
       setColor(22)
-      printc("(Done Relocating)", screenWidth div 2, screenHeight - 30)
+      if unitsMoved == 0:
+        printc("(Cancel Relocate)", screenWidth div 2, screenHeight - 30)
+      else:
+        printc("(Relocating...)", screenWidth div 2, screenHeight - 30)
       setColor(23)
       printc("Click when finished relocating", screenWidth div 2, screenHeight - 20)
 
@@ -1604,14 +1683,14 @@ proc gameDraw() =
     if warning:
       setColor(5)
       if actionsLeft == 0:
-        printc("End Turn", screenWidth - 70, screenHeight - 23)
+        printc("End Turn " & $turn, screenWidth - 70, screenHeight - 23)
       else:
-        printc("End Turn (" & $actionsLeft & " actions left)", screenWidth - 70, screenHeight - 23)
+        printc("End Turn " & $turn & " (" & $actionsLeft & " actions left)", screenWidth - 70, screenHeight - 23)
       if homeTown.serpentSacrificeMade == false:
         printc("(Serpent Hungers)", screenWidth - 70, screenHeight - 12)
     else:
       setColor(22)
-      printc("End Turn", screenWidth - 70, screenHeight - 23)
+      printc("End Turn " & $turn, screenWidth - 70, screenHeight - 23)
   elif inputMode == SelectSiteToBuild:
     setColor(22)
     printc("Cancel Build", screenWidth - 70, screenHeight - 23)
@@ -1644,8 +1723,12 @@ proc gameDraw() =
   # cursor
 
   block drawCursor:
-    setSpritesheet(0)
     let (mx,my) = mouse()
+    if hoverUnitChangeTime < time - 0.3 and hoverUnit != nil:
+      setColor(21)
+      setOutlineColor(1)
+      printOutlineC($hoverUnit.kind, mx, my - 15)
+    setSpritesheet(0)
     if inputMode == SelectUnit:
       spr(33, mx - 4, my - 4)
     elif inputMode == Relocate or inputMode == PlaceUnit:
@@ -1675,5 +1758,7 @@ nico.createWindow("ld43", 1920 div 3, 1080 div 3, 2)
 fps(60)
 fixedSize(true)
 integerScale(true)
+
+srand()
 
 nico.run(gameInit, gameUpdate, gameDraw)
