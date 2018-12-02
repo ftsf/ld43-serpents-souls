@@ -226,6 +226,7 @@ type InputKind = enum
   SelectUnit
 
 # PREPROCS
+proc gameInit()
 proc expand(self: Town)
 proc newSite(town: Town, siteSettings: SiteSettings, x, y: int): Site {.discardable.}
 proc newParticle*(pos: Vec2f, vel: Vec2f, ttl: float32, sheet: int, startSpr: int, endSpr: int)
@@ -945,6 +946,11 @@ proc expand(self: Town) =
 proc endTurn() =
   undoStack = @[]
 
+  if homeTown.serpentSouls >= 100:
+    dialogYesNo("THE SERPENT GOD HAS BEEN SUMMONED!") do:
+      gameInit()
+    return
+
   # mark all sites as unused
   # reset actions
   # for every rebel, increase rebellion
@@ -1035,6 +1041,11 @@ proc endTurn() =
             for town in towns:
               if town.team == 0 and town.pos.x == x + n[0] and town.pos.y == y + n[1]:
                 town.team = 2
+                break
+              if town.team == 1 and town.pos.x == x + n[0] and town.pos.y == y + n[1]:
+                town.team = 2
+                dialogYesNo("Your town has been conquered by Colonists") do:
+                  gameInit()
                 break
             let t2 = mget(x+n[0],y+n[1])
             if t2 in [2.uint8,3,4,5,6]:
