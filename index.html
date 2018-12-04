@@ -13,11 +13,12 @@
 				image-rendering: -moz-crisp-edges;
 				image-rendering: -webkit-crisp-edges;
 				image-rendering: pixelated;
+                cursor: none;
 			}
 		</style>
 	</head>
 	<body>
-    <div id="nicogame"></div>
+    <div id="nicogame" style="cursor: none;"></div>
 		<script type="text/javascript">
 		function handleMouseDown(evt) { window.focus(); evt.preventDefault(); evt.stopPropagation(); evt.target.style.cursor = 'default'; }
 		document.getElementById('nicogame').addEventListener('mousedown', handleMouseDown, false);
