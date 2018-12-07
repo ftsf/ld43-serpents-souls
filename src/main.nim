@@ -2,7 +2,8 @@ import nico
 import nico/vec
 import utils
 import sequtils
-import deques
+import cards
+import gui
 
 import strutils
 
@@ -70,6 +71,33 @@ Capture nearby towns
     Use site abilities
     Build a site (optionally replace an existing site)
     Upgrade town (3x3) x 3 actions -> (5x3) x4 actions -> (5x4) x 5 actions
+
+Destiny Deck
+  Random Event -> Demand -> Reward / Punishment
+
+  How does it affect multiple cities?
+  Only hometown? All cities?
+
+  eg.
+  Lots of sacrifice one follower -> no gain / light penalty
+
+  Sacrifice one follower -> nada / a follower becomes sick
+  Sacrifice one follower -> nada / all newborns will be sick
+  Sacrifice one follower -> nada / one home is disabled
+  Sacrifice one follower -> nada / only one relocate
+  Sacrifice one follower -> nada / one less action
+  Sacrifice one follower -> nada / a follower becomes sick
+  Sacrifice one follower -> nada / a follower becomes sick
+  Sacrifice one follower -> nada / spawn a rebel
+
+  A few medium difficulty with slight gains, heavy penalty
+
+  Sacrifice two followers -> 1 extra action next turn / a home is destroyed
+  Sacrifice three followers -> five new followers
+  5 Sick people arrive -> Heal 5 Sick people -> 2 new followers / 5 followers become sick
+  Temple flooded -> Sacrifice 3 people -> nada / Temple remains flooded
+
+  A few hard difficulty with big gains, slight penalty
 
 """
 
@@ -149,10 +177,11 @@ type
     sourceSite: Site
     team: int
     pos: Vec2f
-    souls: int
     flash: int
     hp: int
     usedAbility: bool
+    souls: int
+    abilities: seq[ShamanAbility]
 
   SiteAbility = object
     name: string
@@ -182,7 +211,7 @@ type
     startOfTurn: bool
     action: proc(unit: Unit, site: Site)
 
-  SiteSettings = object
+  SiteSettings = ref object
     name: string
     desc: string
     spr: int
@@ -208,7 +237,7 @@ type
     team: int
     isHometown: bool
     serpentSouls: int
-    serpentSacrificeMade: bool
+    serpentSacrificesMade: int
 
   Army = ref object of RootObj
     pos: Vec2i
@@ -218,32 +247,19 @@ type
     dest: Town
     moved: bool
 
-  CardType = enum
-    cardDestiny
-    cardCurse
+  DestinyCardSettings = ref object of CardSettings
+    event: string
+    requirement: string
+    gain: string
+    penalty: string
+    onStartTurn: proc(c: Card)
+    onEndTurn: proc(c: Card)
 
-  Card = ref object
-    cardType*: CardType
-    pos*: Vec2f
-    down*: bool
-    name*: string
-    desc*: string
-    onPlay*: proc(c: Card)
-
-  CardMove = ref object
-    c*: Card
-    delay*: float32
-    source*: Vec2f
-    dest*: Vec2f
-    time*: float32
-    alpha*: float32
-    onComplete*: proc(cm: CardMove)
-
-  DeckOfCards* = ref object
-    pos*: Vec2i
-    label*: string
-    cards*: Deque[Card]
-    open*: bool
+  TurnPhase = enum
+    phaseStartOfTurn
+    phaseTurn
+    phaseCombat
+    phaseEndOfTurn
 
 type InputKind = enum
   SelectSite
@@ -255,24 +271,12 @@ type InputKind = enum
 
 # PREPROCS
 proc gameInit()
+proc dialogYesNo(text: string, onYes: proc() = nil, onNo: proc() = nil)
 proc expand(self: Town)
 proc newSite(town: Town, siteSettings: SiteSettings, x, y: int): Site {.discardable.}
 proc newParticle*(pos: Vec2f, vel: Vec2f, ttl: float32, sheet: int, startSpr: int, endSpr: int)
 proc newParticleText*(pos: Vec2f, vel: Vec2f, ttl: float32, text: string, color1,color2: int)
-
-proc newDeckOfCards(label: string): DeckOfCards =
-  result = new(DeckOfCards)
-  result.label = label
-  result.cards = initDeque[Card]()
-
-proc newUnit(unitKind: UnitKind, site: Site): Unit =
-  result = new(Unit)
-  result.site = site
-  result.kind = unitKind
-  result.souls = 1
-  result.flash = 5
-  result.hp = 1
-  result.usedAbility = false
+proc newUnit(kind: UnitKind, site: Site): Unit
 
 proc removeFollower(self: Site) =
   for i,u in units:
@@ -373,6 +377,7 @@ proc getSickCount(self: Town): int =
   return count
 
 # GLOBALS
+var turnPhase: TurnPhase
 var particles: seq[Particle]
 var time: float32
 var turn: int
@@ -386,7 +391,6 @@ var placingUnitSource: Site
 var inputMode: InputKind
 var selectedUnit: Unit
 var hoverUnit: Unit
-var unitsMoved: int
 var buildPreview: SiteSettings
 var forcedLabour = false
 var towns: seq[Town]
@@ -394,9 +398,11 @@ var armies: seq[Army]
 var pulling: bool
 var hoverChangeTime: float32
 var hoverSite: Site
-var cardMoves: seq[CardMove]
-var destinyDeck: DeckOfCards
-var curseDeck: DeckOfCards
+var destinyPile: Pile
+var destinyDiscardPile: Pile
+var currentDestiny: Card
+
+var mainMenu: bool
 
 var areYouSure: bool
 var areYouSureMessage: string
@@ -466,13 +472,12 @@ let siteEmpty = SiteSettings(name: "", spr: -1, abilities: @[
 
 
 let abilityDemolish = SiteAbility(name: "Demolish", nFollowers: 3, nActions: 1, ignore: true, action: proc(site: Site) =
-  for i, s in site.town.sites:
-    if s == site:
-      var newSite = newSite(site.town, siteEmpty, i mod site.town.width, i div site.town.width)
-      site.town.sites[i] = newSite
-      newSite.units = site.units
-      selectedSite = newSite
-      break
+  dialogYesNo("Are you sure you want to demolish this <21>" & site.settings.name & "</>?", proc() =
+    site.settings = siteEmpty
+  , proc() =
+    currentTown.actions += 1
+    site.used = false
+  )
 )
 
 let siteSquare = SiteSettings(name: "Village Center", spr: 8, abilities: @[
@@ -502,39 +507,23 @@ let siteMedic = SiteSettings(name: "Healer's Tent", actionsToBuild: 1, spr: 11, 
 ])
 
 let siteSerpent = SiteSettings(name: "Serpent Totem", spr: 0, abilities: @[
-  SiteAbility(name: "Required Sacrifice", desc: "If no sacrifices\nsickness spreads", startOfTurn: true, nActions: 0, action: proc(site: Site) =
-    if homeTown.serpentSacrificeMade == false:
-      # pick a random follower and make them sick
-      let nFollowers = site.town.getFollowerCount()
-      if nFollowers > 0:
-        var r = rnd(nFollowers-1)
-        var i = 0;
-        block findFollower:
-          for s in site.town.sites:
-            for u in s.units:
-              if u.kind == Follower:
-                if i == r:
-                  u.kind = Sick
-                  u.flash = 5
-                  break findFollower
-                i += 1
-    homeTown.serpentSacrificeMade = false
-  ),
   SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a follower and let their\nsoul flow into the Serpent", nFollowers: 2, nActions: 0, multiUse: true, action: proc(site: Site) =
     # kill 1 follower, capture one soul
     site.removeFollower()
     homeTown.serpentSouls += 1
     site.town.rebellion += 1
-    homeTown.serpentSacrificeMade = true
+    homeTown.serpentSacrificesMade += 1
   ),
   SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a Shaman, all their souls\nwill flow into the Serpent", nFollowers: 1, nShamans: 1, multiUse: true, nActions: 0, action: proc(site: Site) =
     # kill 1 shaman, capture their souls
     # TODO: select shaman
-    let mage = site.removeShaman()
-    homeTown.serpentSouls += 1
-    homeTown.serpentSouls += mage.souls
-    site.town.rebellion += 1
-    homeTown.serpentSacrificeMade = true
+    for u in site.units:
+      if u.kind == Shaman:
+        homeTown.serpentSouls += 1
+        homeTown.serpentSouls += u.souls
+        site.town.rebellion += 1
+        homeTown.serpentSacrificesMade += 1
+        u.hp = 0
   ),
   SiteAbility(name: "Expand Village", desc: "Expands the village from\n3x3 to 5x3 and 5x3 to 5x4", nFollowers: 10, nActions: 3, action: proc(site: Site) =
     site.town.expand()
@@ -572,7 +561,7 @@ let siteBarracks = SiteSettings(name: "Barracks", desc: "Train soldiers", spr: 3
         u.flash = 5
         break
   ),
-  SiteAbility(name: "Train", desc: "Convert a Follower\ninto a Soldier", nFollowers: 1, nActions: 1, action: proc(site: Site) =
+  SiteAbility(name: "Train", desc: "Convert a Follower\ninto a Soldier", nFollowers: 1, nSoldiers: 3, nActions: 1, action: proc(site: Site) =
     for u in site.units:
       if u.kind == Follower:
         u.kind = Soldier
@@ -682,6 +671,23 @@ let siteWatchtower = SiteSettings(name: "Watchtower", desc: "Reduce Rebellion", 
   abilityDemolish,
 ])
 
+let destinySacrifice1Sick = DestinyCardSettings(
+  name: "Sacrifice",
+  requirement: "Sacrifice one follower",
+  gain: "",
+  penalty: "One follower becomes sick",
+  onEndTurn: proc(c: Card) =
+    if homeTown.serpentSacrificesMade < 1:
+      echo "making one follower sick"
+    else:
+      echo "sacrifice was made"
+  )
+
+
+let destinySettings = @[
+  destinySacrifice1Sick,
+]
+
 let buildMenu: seq[SiteSettings] = @[
   siteHouse,
   siteAltar,
@@ -695,17 +701,16 @@ let buildMenu: seq[SiteSettings] = @[
 
 # PROCS
 
-proc moveCard(c: Card, dest: Vec2f, delay: float32, onComplete: proc(cm: CardMove)) =
-  var cm = new(CardMove)
-  cm.c = c
-  cm.delay = delay
-  cm.source = c.pos
-  cm.dest = dest
-  cm.onComplete = onComplete
-  cm.time = 0.2
-  cm.alpha = 0
-
-  cardMoves.add(cm)
+proc newUnit(kind: UnitKind, site: Site): Unit =
+  result = new(Unit)
+  result.souls = 1
+  if kind == Shaman:
+    result.abilities = @[shamanAbilities[0]]
+  result.site = site
+  result.kind = kind
+  result.flash = 5
+  result.hp = 1
+  result.usedAbility = false
 
 proc dialogYesNo(text: string, onYes: proc() = nil, onNo: proc() = nil) =
   areYouSure = true
@@ -771,7 +776,11 @@ proc draw(self: Unit, x,y: int) =
       circfill(x + 4 + cos(angle) * 5, y + 4 + sin(angle) * 5, 1)
 
 proc check(self: SiteAbility, site: Site): bool =
-  if (startOfTurn == false and multiUse == false) and site.used:
+  if placingUnits.len > 0:
+    return false
+  if startOfTurn and turnPhase != phaseStartOfTurn:
+    return false
+  if multiUse == false and site.used:
     return false
   if nActions > site.town.actions:
     return false
@@ -855,21 +864,21 @@ proc check(self: ShamanAbility, unit: Unit): bool =
     return false
   return true
 
-proc draw(self: SiteAbility, x, y, w, h: int, disabled: bool, site: Site) =
-  var y = y
-  var x = x
-  hline(0, y - 5, w)
+proc draw(self: SiteAbility, sx, sy, w, h: int, enabled: bool, site: Site) =
+  setSpritesheet(0)
+  var x = sx
+  var y = sy
   if startOfTurn:
     setColor(25)
-    richPrint("(start turn)</> " & name, 10, y)
-  elif disabled:
+    richPrint("Start of turn: " & name, x, y)
+  elif not enabled:
     setColor(25)
-    richPrint("<27>(" & $nActions & ")</> " & name, 10, y)
+    richPrint("<27>(" & $nActions & ")</> " & name, x, y)
   else:
     setColor(22)
-    richPrint("<8>(" & $nActions & ")</> " & name, 10, y)
+    richPrint("<8>(" & $nActions & ")</> " & name, x, y)
   y += 10
-  x = 10
+  x = sx
   var j = 0
   let followerCount = site.getFollowerCount
   let shamanCount = site.getShamanCount
@@ -933,27 +942,27 @@ proc draw(self: SiteAbility, x, y, w, h: int, disabled: bool, site: Site) =
     print("multi-use", x + 5, y)
 
   y += 10
+  x = sx
   setColor(23)
   for line in desc.split("\n"):
-    print(line, 10, y)
+    print(line, x, y)
     y += 10
 
-proc draw(self: ShamanAbility, x, y, w, h: int, disabled: bool) =
-  var y = y
-  var x = x
-  hline(0, y - 5, w)
+proc draw(self: ShamanAbility, sx, sy, w, h: int, enabled: bool, unit: Unit) =
+  var y = sy
+  var x = sx
   if startOfTurn:
     setColor(25)
     richPrint("(start turn)</> " & name, 10, y)
-  elif disabled:
+  elif not enabled:
     setColor(25)
-    richPrint("<27>(" & $nActions & ")</> " & name & (if multiUse: " <27>multi-use" else: ""), 10, y)
+    richPrint("<27>(" & $nActions & ")</> " & name & (if multiUse: " <27>multi-use" else: ""), x, y)
   else:
     setColor(22)
-    richPrint("<8>(" & $nActions & ")</> " & name & (if multiUse: " <8>multi-use" else: ""), 10, y)
+    richPrint("<8>(" & $nActions & ")</> " & name & (if multiUse: " <8>multi-use" else: ""), x, y)
   y += 10
 
-  x = 10
+  x = sx
 
   var j = 0
   for i in 0..<nSouls:
@@ -1002,11 +1011,9 @@ proc draw(self: ShamanAbility, x, y, w, h: int, disabled: bool) =
 
   y += 10
 
-  x = 10
+  x = sx
   setColor(23)
-  for line in desc.split("\n"):
-    print(line, 10, y)
-    y += 10
+  richPrint(desc, x, y)
 
 proc draw(self: Town) =
   let cx = screenWidth div 2 - width * 25
@@ -1040,7 +1047,30 @@ proc expand(self: Town) =
         site = newSite(self, siteEmpty, i mod 5, i div 5)
 
 
+proc startTurn() =
+  turnPhase = phaseStartOfTurn
+
+  undoStack = @[]
+  turn += 1
+
+  # draw one destiny card
+  currentDestiny = destinyPile.drawCard()
+
+  # start of turn actions
+  for town in towns:
+    for site in town.sites:
+      site.used = false
+      for u in site.units:
+        u.site = site
+        u.sourceSite = site
+      for ab in site.settings.abilities:
+        if ab.startOfTurn:
+          if ab.check(site):
+            ab.action(site)
+
 proc endTurn() =
+  turnPhase = phaseEndOfTurn
+
   undoStack = @[]
 
   if homeTown.serpentSouls >= 100:
@@ -1120,54 +1150,13 @@ proc endTurn() =
       if site.units.len > 15:
         site.units.setLen(15)
 
-    # start of turn actiosn
-    for site in town.sites:
-      site.used = false
-      for u in site.units:
-        u.site = site
-        u.sourceSite = site
-      for ab in site.settings.abilities:
-        if ab.startOfTurn:
-          if ab.check(site):
-            ab.action(site)
+  startTurn()
 
-  turn += 1
+  turnPhase = phaseTurn
 
-  if turn mod 5 == 0:
-    # expand colonists
-    for town in towns:
-      if town.team == 2:
-        for n in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,1),(-1,1),(1,-1)]:
-          let t = mget(town.pos.x + n[0], town.pos.y + n[1])
-          if t in [2.uint8,3,4,5,6]:
-            mset(town.pos.x + n[0], town.pos.y + n[1], t + 32)
-
-    for y in 0..<mapHeight():
-      for x in 0..<mapWidth():
-        let t = mget(x,y)
-        if t in [34.uint8,35,36,37,38]:
-          for n in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,1),(-1,1),(1,-1)]:
-            for town in towns:
-              if town.team == 0 and town.pos.x == x + n[0] and town.pos.y == y + n[1]:
-                town.team = 2
-                break
-              if town.team == 1 and town.pos.x == x + n[0] and town.pos.y == y + n[1]:
-                town.team = 2
-                dialogYesNo("Your town has been conquered by Colonists") do:
-                  gameInit()
-                break
-            let t2 = mget(x+n[0],y+n[1])
-            if t2 in [2.uint8,3,4,5,6]:
-              mset(x+n[0],y+n[1], t2 + 32 + 16)
-
-    for y in 0..<mapHeight():
-      for x in 0..<mapWidth():
-        let t = mget(x,y)
-        if t in [50.uint8,51,52,53,54]:
-          mset(x,y,t-16)
 
 proc tryEndTurn() =
-  if homeTown.serpentSacrificeMade == false:
+  if homeTown.serpentSacrificesMade == 0:
     dialogYesNo("Are you sure?\n<27>The Serpent God has not received her offering") do:
       endTurn()
   else:
@@ -1215,6 +1204,7 @@ proc gameInit() =
   loadSpritesheet(1, "tileset.png", 32, 32)
   loadSpritesheet(2, "tilesetWorld.png", 8, 8)
 
+  turnPhase = phaseTurn
 
   loadMap(0, "map.json")
   setMap(0)
@@ -1222,8 +1212,11 @@ proc gameInit() =
   particles = @[]
   towns = @[]
   armies = @[]
-  destinyDeck = newDeckOfCards("Destiny")
-  curseDeck = newDeckOfCards("Serpent")
+  destinyPile = newPile("Destiny")
+  destinyDiscardPile = newPile("Destiny Discard")
+
+  for i in 0..<10:
+    destinyPile.addCard(newCard(destinySacrifice1Sick))
 
   turn = 1
   time = 0.0
@@ -1286,7 +1279,6 @@ proc undo() =
     currentTown = undoStack[undoStack.high]
     currentArmy = nil
     placingUnits = @[]
-    unitsMoved = 0
     selectedSite = nil
     selectedUnit = nil
     hoverUnit = nil
@@ -1297,16 +1289,188 @@ proc undo() =
       homeTown = currentTown
     towns[towns.find(oldCurrentTown)] = currentTown
 
-proc gameUpdate(dt: float32) =
+proc gameGui() =
+  G.normalColor = 15
+  G.buttonBackgroundColor = 31
+  G.buttonBackgroundColorDisabled = 1
+  G.hoverColor = 22
+  G.activeColor = 21
+  G.textColor = 22
+  G.downColor = 1
+  G.disabledColor = 25
+  G.backgroundColor = 1
+  G.hSpacing = 3
+  G.vSpacing = 3
+  G.hPadding = 4
+  G.vPadding = 4
+
+  if mainMenu:
+    G.areaBegin(screenWidth div 2 - 100, screenHeight div 2 - 70, 200, 175, gTopToBottom, true, true)
+    G.hExpand = true
+    G.center = true
+    G.label("<21>Serpent's Souls</>")
+    G.label("A game by <8>Impbox</> for <27>LD43</>")
+    if G.button("Continue"):
+      mainMenu = false
+    G.empty(5,5)
+    if G.button("Save"):
+      mainMenu = false
+    if G.button("Load"):
+      mainMenu = false
+    G.empty(5,5)
+    if G.button("Restart"):
+      mainMenu = false
+      gameInit()
+    if G.button("Quit"):
+      shutdown()
+    G.center = false
+    G.hExpand = false
+    G.areaEnd()
+
   if areYouSure:
-    if mousebtnp(0) or btnp(pcStart):
+    G.areaBegin(screenWidth div 2 - 200, screenHeight div 2 - 30, 400, 70, gTopToBottom, true, true)
+    G.label(areYouSureMessage)
+    if G.button("Yes"):
       if areYouSureYes != nil:
         areYouSureYes()
       areYouSure = false
-    elif mousebtnp(2) or btnp(pcBack):
+    if G.button("No"):
       if areYouSureNo != nil:
         areYouSureNo()
       areYouSure = false
+    G.areaEnd()
+
+  # town info
+  G.areaBegin(screenWidth div 4 + 4, 10, screenWidth div 2 - 8, 50, gTopToBottom, true)
+  G.center = false
+  if currentTown != nil:
+    G.label(currentTown.name)
+    G.label("Actions: <8>(" & $currentTown.actions & ")</>")
+    G.label("Rebellion: <27>" & $currentTown.rebellion & "</>")
+  G.areaEnd()
+
+  # right bar
+  G.areaBegin(screenWidth - 160, 3, 160 - 3, screenHeight - 36, gTopToBottom, true)
+  G.center = true
+  G.hExpand = true
+
+  var hoveringOverAbility = false
+
+  if inputMode == SelectSiteToBuild:
+    G.label("Select new Site to Build")
+    for building in buildMenu:
+      if G.button("<8>(" & $building.actionsToBuild & ")</> " & building.name & "\n" & building.desc, currentTown.actions >= building.actionsToBuild):
+        currentTown.actions -= building.actionsToBuild
+        selectedSite.settings = building
+        selectedSite.used = false
+        inputMode = SelectSite
+        if forcedLabour:
+          selectedSite.removeFollower()
+          currentTown.rebellion += 1
+          break
+    G.empty(10,10)
+    if G.button("Cancel building"):
+      inputMode = SelectSite
+      selectedSite.used = false
+
+  elif selectedUnit != nil:
+    G.label("Shaman")
+    if selectedUnit.usedAbility:
+      G.label("Already used this turn")
+
+    G.center = false
+    var i = 0
+    for a in selectedUnit.abilities:
+      let ret = G.button(148, 50, a.check(selectedUnit)) do(x,y,w,h: int, enabled: bool):
+        a.draw(x,y,w,h,enabled,selectedUnit)
+      if ret:
+        a.action(selectedUnit, selectedSite)
+        if not a.multiUse:
+          selectedUnit.usedAbility = true
+      if G.hoverElement == G.element:
+        hoveringOverAbility = true
+      i += 1
+    if i < 4:
+      if G.button("Learn new ability", 148, 50):
+        discard
+
+    G.hExpand = false
+
+  elif selectedSite != nil:
+    if selectedSite.settings.name == "":
+      G.label("Empty Site")
+    else:
+      if selectedSite.used:
+        setColor(22)
+      else:
+        setColor(8)
+      G.label(selectedSite.settings.name)
+
+      setColor(22)
+
+    if selectedSite.used:
+      G.label("Already used this turn")
+
+    setSpritesheet(1)
+    if selectedSite.settings.spr != -1:
+      G.sprite(selectedSite.settings.spr)
+
+    G.center = false
+    for k,a in selectedSite.settings.abilities:
+      let ret = G.button(148, 50, a.check(selectedSite)) do(x,y,w,h: int, enabled: bool):
+        a.draw(x,y,w,h,enabled,selectedSite)
+      if ret:
+        inputMode = SelectSite
+        a.action(selectedSite)
+        if not a.multiUse:
+          selectedSite.used = true
+        currentTown.actions -= a.nActions
+      if G.hoverElement == G.element:
+        hoveringOverAbility = true
+
+
+  G.hExpand = false
+  G.areaEnd()
+
+  # bottom bar
+  G.areaBegin(0, screenHeight - 30, screenWidth, 28, gRightoLeft)
+  G.center = true
+
+  if inputMode == SelectSite:
+    if G.button("End Turn", 64, 28):
+      tryEndTurn()
+  else:
+    G.empty(64, 28)
+
+  if inputMode == Relocate:
+    var unitsMoved = 0
+    for site in currentTown.sites:
+      for u in site.units:
+        if u.site != u.sourceSite:
+          unitsMoved += 1
+    if G.button(if hoveringOverAbility and frame mod 60 < 30: "<27>This will end your relocation</>" elif unitsMoved == 0: "Cancel relocate" else: "Complete relocate", 148, 28, placingUnits.len == 0):
+      inputMode = SelectSite
+      if unitsMoved == 0:
+        currentTown.actions += 1
+  else:
+    if G.button((if currentTown.actions >= 1: "<8>" else: "<27>") & "(1)</> Relocate\n<24>Move any number of units", 128, 28, currentTown.actions >= 1):
+      saveUndo()
+      inputMode = Relocate
+      placingUnits = @[]
+      currentTown.actions -= 1
+      for site in currentTown.sites:
+        for u in site.units:
+          u.site = site
+          u.sourceSite = site
+  G.areaEnd()
+
+proc gameUpdate(dt: float32) =
+  G.update(gameGui, dt)
+
+  if(btnp(pcBack)):
+    mainMenu = not mainMenu
+
+  if G.activeElement != 0 or G.hoverElement != 0 or G.modalArea != 0:
     return
 
   if mousebtnp(2):
@@ -1364,11 +1528,13 @@ proc gameUpdate(dt: float32) =
 
     if mousebtnpr(0,15):
       if pulling:
+        # grab unit
         if hoverUnit != nil and hoverSite != nil:
           if hoverUnit.kind == Rebel or hoverUnit.kind == Neutral:
             return
           placingUnits.add(hoverUnit)
           placingUnitSource = hoverSite
+          selectedSite = hoverSite
           hoverUnit.site = nil
           let i = placingUnitSource.units.find(hoverUnit)
           if i != -1:
@@ -1376,13 +1542,13 @@ proc gameUpdate(dt: float32) =
           return
       else:
         if hoverSite != nil:
+          # place unit
           if placingUnits.len > 0:
             var u = placingUnits[placingUnits.high]
             placingUnits.delete(placingUnits.high)
             hoverSite.units.add(u)
             u.site = hoverSite
-            if u.site != u.sourceSite:
-              unitsMoved += 1
+            selectedSite = hoverSite
             if placingUnits.len == 0 and inputMode == PlaceUnit:
               inputMode = SelectSite
 
@@ -1393,42 +1559,6 @@ proc gameUpdate(dt: float32) =
   if mousebtnp(0):
     var (mx,my) = mouse()
     # check which thing they clicked on
-    if my > screenHeight - 30:
-        # bottom bar
-      if mx > screenWidth div 4 * 3:
-        # right
-        if inputMode == SelectSite:
-          tryEndTurn()
-          return
-        elif inputMode == SelectSiteToBuild:
-          # cancel build
-          selectedSite.used = false
-          inputMode = SelectSite
-          return
-      elif mx > screenWidth div 4:
-        # mid
-        if currentArmy != nil and inputMode == SelectSite and currentArmy.moved == false:
-          inputMode = MoveArmy
-          return
-        elif currentArmy != nil and inputMode == MoveArmy:
-          inputMode = SelectSite
-          return
-        elif currentTown != nil and inputMode == SelectSite:
-          if currentTown.actions > 0:
-            saveUndo()
-            currentTown.actions -= 1
-            inputMode = Relocate
-            placingUnits = @[]
-            for site in currentTown.sites:
-              for u in site.units:
-                u.site = site
-                u.sourceSite = site
-            return
-        elif inputMode == Relocate and placingUnits.len == 0:
-          if unitsMoved == 0:
-            currentTown.actions += 1
-          inputMode = SelectSite
-          return
     if mx < screenWidth div 4 and (inputMode == SelectSite or inputMode == Relocate or inputMode == MoveArmy):
       # choose town or army on worldMap
       let tx = mx div 8
@@ -1514,18 +1644,6 @@ proc gameUpdate(dt: float32) =
             var building = buildMenu[ty]
             if building.actionsToBuild <= currentTown.actions:
               currentTown.actions -= building.actionsToBuild
-              for i, site in currentTown.sites:
-                if site == selectedSite:
-                  var oldSite = site
-                  var newSite = newSite(currentTown, building, i mod currentTown.width, i div currentTown.width)
-                  currentTown.sites[i] = newSite
-                  newSite.units = oldSite.units
-                  inputMode = SelectSite
-                  selectedSite = newSite
-                  if forcedLabour:
-                    newSite.removeFollower()
-                    currentTown.rebellion += 1
-                  break
       elif inputMode == SelectSite:
         if selectedUnit != nil:
           # shaman ability select
@@ -1677,82 +1795,6 @@ proc gameDraw() =
 
   setSpritesheet(0)
 
-  if inputMode == SelectSiteToBuild:
-    # show options for building
-    var w = screenWidth div 4
-    setCamera(-(w * 3), 0)
-    setColor(21)
-    var y = 10
-    printc("Select new Site to Build", w div 2, y)
-    y += 30
-
-    for site in buildMenu:
-      setColor(22)
-      if currentTown.actions < site.actionsToBuild:
-        richPrint("<27>(" & $site.actionsToBuild & ")</> <23>" & site.name, 4, y)
-      else:
-        richPrint("<8>(" & $site.actionsToBuild & ")</> " & site.name, 4, y)
-      y += 10
-      setColor(24)
-      print(site.desc, 4, y)
-      y += 10
-      setColor(15)
-      hline(0, y - 25, screenWidth div 4)
-      hline(0, y + 5, screenWidth div 4)
-      y += 10
-
-    y += 20
-  elif inputMode == SelectSite and selectedUnit != nil:
-    # Shaman abilities
-    var w = screenWidth div 4
-    setCamera(-(w * 3), 0)
-    setColor(21)
-    var y = 10
-    printc("Shaman", w div 2, y)
-    printc("Souls: " & $selectedUnit.souls, w div 2, y + 10)
-
-    setColor(15)
-    vline(0, 0, screenHeight)
-    hline(0, y + 20, w)
-
-    y += 25
-    var x = 0
-
-    for k,ability in shamanAbilities:
-      ability.draw(x, y, w, 50, ability.check(selectedUnit) == false)
-      y += 50
-
-  elif inputMode == SelectSite and selectedSite != nil and currentTown != nil:
-    # Site Info
-    var w = screenWidth div 4
-    setCamera(-(w * 3), 0)
-    setColor(21)
-    var y = 10
-    printc(if selectedSite.settings.name == "": "Empty Land" else: selectedSite.settings.name, w div 2, y)
-    y += 10
-    if selectedSite.used:
-      setColor(22)
-      printc("[ Already Used ]", w div 2, y)
-
-    if selectedSite.settings.spr > -1:
-      setSpritesheet(1)
-      spr(selectedSite.settings.spr, w div 2 - 16, y)
-      y += 24
-
-    setSpritesheet(0)
-
-    setColor(15)
-    vline(0, 0, screenHeight)
-    hline(0, y + 10, w)
-
-    y += 15
-    var x = 0
-
-    # Site abilities
-    for k,ability in selectedSite.settings.abilities:
-      ability.draw(x, y, w, 50, ability.startOfTurn or ability.check(selectedSite) == false, selectedSite)
-      y += 50
-
   setCamera()
 
   if currentArmy != nil:
@@ -1766,65 +1808,6 @@ proc gameDraw() =
     elif inputMode == MoveArmy:
       setColor(22)
       printc("Select Destination", screenWidth div 2, screenHeight - 25)
-
-  elif currentTown != nil:
-    setColor(teamColors[currentTown.team])
-    printc(currentTown.name, screenWidth div 2, 10)
-    setColor(22)
-    richPrint("actions: <8>(" & $currentTown.actions & ")", screenWidth div 2, 20, taCenter)
-    printc("serpent souls: " & $homeTown.serpentSouls & "/100", screenWidth div 2, 30)
-    richPrint("rebellion: <27>" & $currentTown.rebellion & "</> <27>+" & $currentTown.getRebelCount(), screenWidth div 2, 40, taCenter)
-
-    setColor(15)
-    hline(0, screenHeight - 32, screenWidth)
-
-    if inputMode == SelectSite:
-      if currentTown.actions > 0:
-        setColor(22)
-      else:
-        setColor(25)
-      richPrint("<8>(1)</> Relocate", screenWidth div 2, screenHeight - 25, taCenter)
-      setColor(23)
-      printc("Move any number of units", screenWidth div 2, screenHeight - 15)
-    elif inputMode == Relocate and placingUnits.len == 0:
-      setColor(22)
-      if unitsMoved == 0:
-        printc("(Cancel Relocate)", screenWidth div 2, screenHeight - 30)
-      else:
-        printc("(Relocating...)", screenWidth div 2, screenHeight - 30)
-      setColor(23)
-      printc("Click when finished relocating", screenWidth div 2, screenHeight - 20)
-
-  if inputMode == SelectSite:
-    var warning = false
-    var actionsLeft = 0
-    var freeActionsLeft = 0
-    for town in towns:
-      if town.team == 1 and town.actions > 0:
-        warning = true
-        actionsLeft += town.actions
-
-    for army in armies:
-      if army.team == 1 and army.moved == false:
-        warning = true
-        actionsLeft += 1
-
-    if homeTown.serpentSacrificeMade == false:
-      warning = true
-
-    setColor(22)
-    if warning:
-      if actionsLeft == 0:
-        richPrint("End Turn " & $turn, screenWidth - 75, screenHeight - 25, taCenter)
-      else:
-        richPrint("End Turn " & $turn & " <8>(" & $actionsLeft & " actions left)", screenWidth - 75, screenHeight - 25, taCenter)
-      if homeTown.serpentSacrificeMade == false:
-        richPrint("<28>(Serpent Hungers)", screenWidth - 75, screenHeight - 12, taCenter)
-    else:
-      printc("End Turn " & $turn, screenWidth - 75, screenHeight - 25)
-  elif inputMode == SelectSiteToBuild:
-    setColor(22)
-    printc("Cancel Build", screenWidth - 75, screenHeight - 25)
 
   # particles
   for p in mitems(particles):
@@ -1841,18 +1824,10 @@ proc gameDraw() =
 
   particles.keepItIf(it.ttl > 0)
 
-  if areYouSure:
-    setColor(1)
-    rectfill(screenWidth div 2 - 200, screenHeight div 2 - 30, screenWidth div 2 + 200, screenHeight div 2 + 50)
-    setColor(21)
-    rect(screenWidth div 2 - 200, screenHeight div 2 - 30, screenWidth div 2 + 200, screenHeight div 2 + 50)
-    richPrint(areYouSureMessage, screenWidth div 2, screenHeight div 2, taCenter)
-
-    if areYouSureYes != nil:
-      richPrint("Left Click - Confirm   /   Right Click - Cancel", screenWidth div 2, screenHeight div 2 + 30, taCenter)
+  setCamera()
+  G.draw(gameGui)
 
   # cursor
-
   block drawCursor:
     let (mx,my) = mouse()
     if hoverChangeTime < time - 0.3:

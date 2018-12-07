@@ -1,34 +1,35 @@
 GIMP Palette
+Channels: RGBA
 #
-  0   0   0	Untitled
- 34  32  52	Untitled
- 69  40  60	Untitled
-102  57  49	Untitled
-143  86  59	Untitled
-223 113  38	Untitled
-217 160 102	Untitled
-238 195 154	Untitled
-251 242  54	Untitled
-153 229  80	Untitled
-106 190  48	Untitled
- 55 148 110	Untitled
- 75 105  47	Untitled
- 82  75  36	Untitled
- 50  60  57	Untitled
- 63  63 116	Untitled
- 48  96 130	Untitled
- 91 110 225	Untitled
- 99 155 255	Untitled
- 95 205 228	Untitled
-203 219 252	Untitled
-255 255 255	Untitled
-155 173 183	Untitled
-132 126 135	Untitled
-105 106 106	Untitled
- 89  86  82	Untitled
-118  66 138	Untitled
-172  50  50	Untitled
-217  87  99	Untitled
-215 123 186	Untitled
-143 151  74	Untitled
-138 111  48	Untitled
+  0   0   0   0	Untitled
+ 34  32  52 255	Untitled
+ 69  40  60 255	Untitled
+102  57  49 255	Untitled
+143  86  59 255	Untitled
+223 113  38 255	Untitled
+217 160 102 255	Untitled
+238 195 154 255	Untitled
+251 242  54 255	Untitled
+153 229  80 255	Untitled
+106 190  48 255	Untitled
+ 55 148 110 255	Untitled
+ 75 105  47 255	Untitled
+ 82  75  36 255	Untitled
+ 50  60  57 255	Untitled
+ 63  63 116 255	Untitled
+ 48  96 130 255	Untitled
+ 91 110 225 255	Untitled
+ 99 155 255 255	Untitled
+ 95 205 228 255	Untitled
+203 219 252 255	Untitled
+255 255 255 255	Untitled
+155 173 183 255	Untitled
+132 126 135 255	Untitled
+105 106 106 255	Untitled
+ 89  86  82 255	Untitled
+118  66 138 255	Untitled
+172  50  50 255	Untitled
+217  87  99 255	Untitled
+215 123 186 255	Untitled
+143 151  74 255	Untitled
+ 53  50  82 255	Untitled

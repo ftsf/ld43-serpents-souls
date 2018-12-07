@@ -88,7 +88,7 @@ proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool 
         break
 
       let c = text[i]
-      if i + 2 < text.high and c == '<' and (text[i+2] == '>' or text[i+3] == '>'):
+      if i + 2 < text.len and c == '<' and (text[i+2] == '>' or text[i+3] == '>'):
         let colStr = if text[i+2] == '>': text[i+1..i+1] else: text[i+1..i+2]
         let col = try: parseInt(colStr) except ValueError: startColor
         setColor(col)
