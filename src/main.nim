@@ -4,6 +4,7 @@ import utils
 import sequtils
 import cards
 import gui
+import times
 
 import strutils
 
@@ -71,6 +72,15 @@ Capture nearby towns
     Use site abilities
     Build a site (optionally replace an existing site)
     Upgrade town (3x3) x 3 actions -> (5x3) x4 actions -> (5x4) x 5 actions
+
+Site Attachments:
+  Each site can have zero to 2 attachments
+  These can be positive or negative effects
+
+  eg.
+  * Disabled for one turn
+  * Plagued: one unit becomes sick each turn until the site it demolished
+
 
 Destiny Deck
   Random Event -> Demand -> Reward / Punishment
@@ -176,6 +186,7 @@ type
     site: Site
     sourceSite: Site
     team: int
+    age: int
     pos: Vec2f
     flash: int
     hp: int
@@ -225,6 +236,12 @@ type
     used: bool
     units: seq[Unit]
 
+  SiteAttachmentSettings = ref object of RootObj
+    name: string
+
+  SiteAttachment = ref object of RootObj
+    settings: SiteAttachmentSettings
+
   Town = ref object of RootObj
     pos: Vec2i
     name: string
@@ -238,6 +255,7 @@ type
     isHometown: bool
     serpentSouls: int
     serpentSacrificesMade: int
+    nHealed: int
 
   Army = ref object of RootObj
     pos: Vec2i
@@ -248,12 +266,15 @@ type
     moved: bool
 
   DestinyCardSettings = ref object of CardSettings
+    count: int
     event: string
-    requirement: string
+    demand: string
     gain: string
     penalty: string
-    onStartTurn: proc(c: Card)
-    onEndTurn: proc(c: Card)
+    checkDemand: proc(c: Card, town: Town): bool
+    onStartTurn: proc(c: Card, town: Town)
+    onEndTurn: proc(c: Card, town: Town)
+    onStartNextTurn: proc(c: Card, town: Town)
 
   TurnPhase = enum
     phaseStartOfTurn
@@ -493,6 +514,7 @@ let siteMedic = SiteSettings(name: "Healer's Tent", actionsToBuild: 1, spr: 11, 
         u.kind = Follower
         u.flash = 5
         site.town.rebellion = max(site.town.rebellion - 1, 0)
+        site.town.nHealed += 1
         break
   ),
   SiteAbility(name: "Heal Sick", desc: "Convert a Sick into a Follower\nReduce rebellion.", nShamans: 1, nSick: 1, nActions: 1, action: proc(site: Site) =
@@ -501,6 +523,7 @@ let siteMedic = SiteSettings(name: "Healer's Tent", actionsToBuild: 1, spr: 11, 
         u.kind = Follower
         u.flash = 5
         site.town.rebellion = max(site.town.rebellion - 1, 0)
+        site.town.nHealed += 1
         break
   ),
   abilityDemolish,
@@ -673,19 +696,177 @@ let siteWatchtower = SiteSettings(name: "Watchtower", desc: "Reduce Rebellion", 
 
 let destinySacrifice1Sick = DestinyCardSettings(
   name: "Sacrifice",
-  requirement: "Sacrifice one follower",
+  demand: "Sacrifice one follower",
   gain: "",
   penalty: "One follower becomes sick",
-  onEndTurn: proc(c: Card) =
-    if homeTown.serpentSacrificesMade < 1:
-      echo "making one follower sick"
-    else:
-      echo "sacrifice was made"
+  checkDemand: proc(c: Card, t: Town): bool =
+    return t.serpentSacrificesMade >= 1
+  ,onEndTurn: proc(c: Card, t: Town) =
+    if t.serpentSacrificesMade < 1:
+      var count = 0
+      for site in t.sites:
+        for u in site.units:
+          if u.kind == Follower:
+            count += 1
+      if count == 0:
+        return
+      let r = rnd(count-1)
+      count = 0
+      for site in t.sites:
+        for u in site.units:
+          if u.kind == Follower:
+            if count == r:
+              u.kind = Sick
+              u.flash = 5
+              break
+            count += 1
   )
 
-
 let destinySettings = @[
-  destinySacrifice1Sick,
+  DestinyCardSettings(
+    count: 10,
+    name: "Sacrifice",
+    demand: "Sacrifice one follower",
+    gain: "",
+    penalty: "All newborns become sick",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 1
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 1:
+        for site in t.sites:
+          for u in site.units:
+            if u.kind == Follower and u.age == 0:
+              u.kind = Sick
+              u.flash = 5
+  ),
+  DestinyCardSettings(
+    count: 5,
+    name: "Sacrifice",
+    demand: "Sacrifice two followers",
+    gain: "",
+    penalty: "All newborns become sick",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 2
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 2:
+        for site in t.sites:
+          for u in site.units:
+            if u.kind == Follower and u.age == 0:
+              u.kind = Sick
+              u.flash = 5
+  ),
+  DestinyCardSettings(
+    count: 5,
+    name: "Sacrifice",
+    demand: "Sacrifice one follower",
+    gain: "",
+    penalty: "One less action",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 1
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 1:
+        t.actions -= 1
+  ),
+  DestinyCardSettings(
+    count: 5,
+    name: "Sacrifice",
+    demand: "Sacrifice one follower",
+    gain: "",
+    penalty: "One home disabled",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 1
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 1:
+        t.actions -= 1
+  ),
+  DestinyCardSettings(
+    count: 5,
+    name: "Sacrifice",
+    demand: "Sacrifice one follower",
+    gain: "",
+    penalty: "One Rebel appears",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 1
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 1:
+        let randomSite = rnd(t.sites)
+        randomSite.units.add(newUnit(Rebel, randomSite))
+  ),
+  DestinyCardSettings(
+    count: 5,
+    name: "Sacrifice",
+    demand: "Sacrifice two followers",
+    gain: "",
+    penalty: "5 Rebels appear",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 2
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 2:
+        for i in 0..<5:
+          let randomSite = rnd(t.sites)
+          randomSite.units.add(newUnit(Rebel, randomSite))
+  ),
+  DestinyCardSettings(
+    count: 5,
+    name: "Sacrifice",
+    demand: "Sacrifice two followers",
+    gain: "Gain an extra action",
+    penalty: "A home is demolished",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 2
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 2:
+        var count = 0
+        for site in t.sites:
+          if site.settings == siteHouse:
+            count += 1
+        if count > 0:
+          let r = rnd(count - 1)
+          count = 0
+          for site in t.sites:
+            if site.settings == siteHouse:
+              if r == count:
+                site.settings = siteEmpty
+                break
+              count += 1
+      else:
+        t.actions += 1
+  ),
+  DestinyCardSettings(
+    count: 5,
+    name: "Sacrifice",
+    event: "5 Sick arrive",
+    demand: "Heal 2 Sick",
+    gain: "Gain 5 Followers",
+    penalty: "2 Followers become Sick",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.nHealed >= 2
+    ,onStartTurn: proc(c: Card, t: Town) =
+      let randomSite = rnd(t.sites)
+      for i in 0..<5:
+        randomSite.units.add(newUnit(Sick, randomSite))
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.nHealed < 2:
+        for i in 0..<2:
+          var count = 0
+          for site in t.sites:
+            for u in site.units:
+              if u.kind == Follower:
+                count += 1
+          if count > 0:
+            let r = rnd(count - 1)
+            count = 0
+            for site in t.sites:
+              for u in site.units:
+                if u.kind == Follower:
+                  if r == count:
+                    u.kind = Sick
+                    u.flash = 5
+                    break
+                count += 1
+      else:
+        t.actions += 1
+  ),
 ]
 
 let buildMenu: seq[SiteSettings] = @[
@@ -710,6 +891,7 @@ proc newUnit(kind: UnitKind, site: Site): Unit =
   result.kind = kind
   result.flash = 5
   result.hp = 1
+  result.age = 0
   result.usedAbility = false
 
 proc dialogYesNo(text: string, onYes: proc() = nil, onNo: proc() = nil) =
@@ -776,8 +958,6 @@ proc draw(self: Unit, x,y: int) =
       circfill(x + 4 + cos(angle) * 5, y + 4 + sin(angle) * 5, 1)
 
 proc check(self: SiteAbility, site: Site): bool =
-  if placingUnits.len > 0:
-    return false
   if startOfTurn and turnPhase != phaseStartOfTurn:
     return false
   if multiUse == false and site.used:
@@ -1053,9 +1233,6 @@ proc startTurn() =
   undoStack = @[]
   turn += 1
 
-  # draw one destiny card
-  currentDestiny = destinyPile.drawCard()
-
   # start of turn actions
   for town in towns:
     for site in town.sites:
@@ -1063,15 +1240,59 @@ proc startTurn() =
       for u in site.units:
         u.site = site
         u.sourceSite = site
+        u.age += 1
       for ab in site.settings.abilities:
         if ab.startOfTurn:
           if ab.check(site):
             ab.action(site)
 
+  if currentDestiny != nil:
+    let ds = currentDestiny.settings.DestinyCardSettings
+    if ds.onStartNextTurn != nil:
+      for town in towns:
+        if town.team == 1:
+          ds.onStartNextTurn(currentDestiny, town)
+
+  for town in towns:
+    town.serpentSacrificesMade = 0
+    town.nHealed = 0
+
+  # draw one destiny card
+  currentDestiny = destinyPile.drawCard()
+  if currentDestiny == nil:
+    echo "destiny pile is empty"
+  else:
+    let ds = currentDestiny.settings.DestinyCardSettings
+    if ds.onStartTurn != nil:
+      for town in towns:
+        if town.team == 1:
+          ds.onStartTurn(currentDestiny, town)
+
 proc endTurn() =
   turnPhase = phaseEndOfTurn
 
   undoStack = @[]
+
+  for town in towns:
+    #spread sickness
+    var nSick = min(town.getSickCount(), 1)
+    for i in 0..<nSick:
+      # convert a follower or soldier to sick
+      let site = rnd(town.sites)
+      if site.units.len > 0:
+        let unit = rnd(site.units)
+        if unit.kind == Sick:
+          unit.hp = 0
+        elif unit.kind == Follower or unit.kind == Rebel:
+          unit.kind = Sick
+          unit.flash = 5
+
+  if currentDestiny != nil:
+    let ds = currentDestiny.settings.DestinyCardSettings
+    if ds.onEndTurn != nil:
+      for town in towns:
+        if town.team == 1:
+          ds.onEndTurn(currentDestiny, town)
 
   if homeTown.serpentSouls >= 100:
     dialogYesNo("THE SERPENT GOD HAS BEEN SUMMONED!") do:
@@ -1105,18 +1326,17 @@ proc endTurn() =
 
     # for every 5 rebellion, make a rebel from a follower (up to one per site)
     # for every soldier, reduce rebellion by 1
-    for town in towns:
-      for site in town.sites:
-        if site.settings != siteRebelBase:
-          var nRebels = 0;
-          for u in site.units:
-            if u.kind == Rebel:
-              nRebels += 1
-          if nRebels >= 5:
-            if site.settings != siteEmpty:
-              site.settings = siteEmpty
-            else:
-              site.settings = siteRebelBase
+    for site in town.sites:
+      if site.settings != siteRebelBase:
+        var nRebels = 0;
+        for u in site.units:
+          if u.kind == Rebel:
+            nRebels += 1
+        if nRebels >= 5:
+          if site.settings != siteEmpty:
+            site.settings = siteEmpty
+          else:
+            site.settings = siteRebelBase
 
     town.rebellion = clamp(town.rebellion + town.getRebelCount(), 0, town.sites.len * 5)
 
@@ -1124,26 +1344,11 @@ proc endTurn() =
     let newRebels = clamp(town.rebellion div 5, 0, 3 + town.size)
     for i in 0..<newRebels:
       # pick a random site and spawn a rebel
-      let r = rnd(town.sites.high)
-      for k,site in town.sites:
-        if k == r:
-          site.units.add(newUnit(Rebel, site))
-          town.rebellion -= 2
+      let randomSite = rnd(town.sites)
+      randomSite.units.add(newUnit(Rebel, randomSite))
+      #town.rebellion -= 1
 
     town.rebellion = clamp(town.rebellion, 0, town.sites.len * 5)
-
-    #spread sickness
-    var nSick = town.getSickCount()
-    for i in 0..<nSick:
-      # convert a follower or soldier to sick
-      let site = rnd(town.sites)
-      if site.units.len > 0:
-        let unit = rnd(site.units)
-        if unit.kind == Sick:
-          unit.hp = 0
-        elif unit.kind == Follower or unit.kind == Rebel:
-          unit.kind = Sick
-          unit.flash = 5
 
     # cap site
     for site in town.sites:
@@ -1156,11 +1361,7 @@ proc endTurn() =
 
 
 proc tryEndTurn() =
-  if homeTown.serpentSacrificesMade == 0:
-    dialogYesNo("Are you sure?\n<27>The Serpent God has not received her offering") do:
-      endTurn()
-  else:
-    endTurn()
+  endTurn()
 
 proc newArmy(pos: Vec2i, team: int, units: seq[Unit]): Army =
   var army = new(Army)
@@ -1200,6 +1401,10 @@ proc newSite(town: Town, siteSettings: SiteSettings, x, y: int): Site {.discarda
   return site
 
 proc gameInit() =
+  let seed = (cpuTime() * 10000.0).int
+  echo "seed: ", seed
+  srand(seed)
+
   loadSpritesheet(0, "spritesheet.png", 8, 8)
   loadSpritesheet(1, "tileset.png", 32, 32)
   loadSpritesheet(2, "tilesetWorld.png", 8, 8)
@@ -1215,8 +1420,13 @@ proc gameInit() =
   destinyPile = newPile("Destiny")
   destinyDiscardPile = newPile("Destiny Discard")
 
-  for i in 0..<10:
-    destinyPile.addCard(newCard(destinySacrifice1Sick))
+  for ds in destinySettings:
+    for i in 0..<ds.count:
+      destinyPile.addCard(newCard(ds))
+
+  destinyPile.shuffle()
+  destinyPile.shuffle()
+  destinyPile.shuffle()
 
   turn = 1
   time = 0.0
@@ -1341,10 +1551,12 @@ proc gameGui() =
     G.areaEnd()
 
   # town info
-  G.areaBegin(screenWidth div 4 + 4, 10, screenWidth div 2 - 8, 50, gTopToBottom, true)
+  G.areaBegin(screenWidth div 4 + 4, 10, screenWidth div 2 - 8, 50, gLeftToRight, true)
   G.center = false
   if currentTown != nil:
+    G.textColor = 18
     G.label(currentTown.name)
+    G.textColor = 22
     G.label("Actions: <8>(" & $currentTown.actions & ")</>")
     G.label("Rebellion: <27>" & $currentTown.rebellion & "</>")
   G.areaEnd()
@@ -1381,7 +1593,7 @@ proc gameGui() =
     G.center = false
     var i = 0
     for a in selectedUnit.abilities:
-      let ret = G.button(148, 50, a.check(selectedUnit)) do(x,y,w,h: int, enabled: bool):
+      let ret = G.button(148, 50, placingUnits.len == 0 and a.check(selectedUnit)) do(x,y,w,h: int, enabled: bool):
         a.draw(x,y,w,h,enabled,selectedUnit)
       if ret:
         a.action(selectedUnit, selectedSite)
@@ -1417,7 +1629,7 @@ proc gameGui() =
 
     G.center = false
     for k,a in selectedSite.settings.abilities:
-      let ret = G.button(148, 50, a.check(selectedSite)) do(x,y,w,h: int, enabled: bool):
+      let ret = G.button(148, 50, placingUnits.len == 0 and a.check(selectedSite)) do(x,y,w,h: int, enabled: bool):
         a.draw(x,y,w,h,enabled,selectedSite)
       if ret:
         inputMode = SelectSite
@@ -1433,36 +1645,72 @@ proc gameGui() =
   G.areaEnd()
 
   # bottom bar
-  G.areaBegin(0, screenHeight - 30, screenWidth, 28, gRightoLeft)
+  G.areaBegin(0, screenHeight - 31, screenWidth, 28, gRightoLeft)
   G.center = true
+
+  var hoveringOverEndTurn = false
 
   if inputMode == SelectSite:
     if G.button("End Turn", 64, 28):
       tryEndTurn()
+    if G.hoverElement == G.element:
+      hoveringOverEndTurn = true
   else:
     G.empty(64, 28)
 
-  if inputMode == Relocate:
-    var unitsMoved = 0
-    for site in currentTown.sites:
-      for u in site.units:
-        if u.site != u.sourceSite:
-          unitsMoved += 1
-    if G.button(if hoveringOverAbility and frame mod 60 < 30: "<27>This will end your relocation</>" elif unitsMoved == 0: "Cancel relocate" else: "Complete relocate", 148, 28, placingUnits.len == 0):
-      inputMode = SelectSite
-      if unitsMoved == 0:
-        currentTown.actions += 1
-  else:
-    if G.button((if currentTown.actions >= 1: "<8>" else: "<27>") & "(1)</> Relocate\n<24>Move any number of units", 128, 28, currentTown.actions >= 1):
-      saveUndo()
-      inputMode = Relocate
-      placingUnits = @[]
-      currentTown.actions -= 1
+  if currentTown != nil:
+    if inputMode == Relocate:
+      var unitsMoved = 0
       for site in currentTown.sites:
         for u in site.units:
-          u.site = site
-          u.sourceSite = site
+          if u.site != u.sourceSite:
+            unitsMoved += 1
+      if hoveringOverAbility:
+        G.buttonBackgroundColor = 27
+      if G.button(if hoveringOverAbility: "<21>This will end your relocation</>" elif unitsMoved == 0: "Cancel relocate" else: "Complete relocate", 148, 28, placingUnits.len == 0):
+        inputMode = SelectSite
+        if unitsMoved == 0:
+          currentTown.actions += 1
+      G.buttonBackgroundColor = 31
+    else:
+      if G.button((if currentTown.actions >= 1: "<8>" else: "<27>") & "(1)</> Relocate\n<24>Move any number of units", 128, 28, currentTown.actions >= 1):
+        saveUndo()
+        inputMode = Relocate
+        placingUnits = @[]
+        currentTown.actions -= 1
+        for site in currentTown.sites:
+          for u in site.units:
+            u.site = site
+            u.sourceSite = site
   G.areaEnd()
+
+  if currentDestiny != nil:
+    G.areaBegin(screenWidth div 4 + 5, screenHeight - 60, 200, 50, gTopToBottom, true)
+    G.vPadding = 1
+    G.vSpacing = 1
+    let ds = currentDestiny.settings.DestinyCardSettings
+    if ds.event != "":
+      G.label("Event: " & ds.event)
+    if ds.demand != "":
+      if ds.checkDemand(currentDestiny, currentTown):
+        G.label("Demand: <18>" & ds.demand)
+      else:
+        if hoveringOverEndTurn and frame mod 10 < 5:
+          G.label("Demand: <21>" & ds.demand)
+        else:
+          G.label("Demand: <27>" & ds.demand)
+    if ds.gain != "":
+      G.label("And: " & ds.gain)
+    if ds.penalty != "":
+      G.label("Or: " & ds.penalty)
+    G.areaEnd()
+
+  G.hSpacing = 3
+  G.vSpacing = 3
+  G.hPadding = 4
+  G.vPadding = 4
+
+
 
 proc gameUpdate(dt: float32) =
   G.update(gameGui, dt)
