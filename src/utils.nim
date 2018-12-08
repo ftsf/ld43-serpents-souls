@@ -1,5 +1,6 @@
 import nico
 import strutils
+import strscans
 
 type TextAlign* = enum
   taLeft
@@ -64,8 +65,25 @@ proc richPrintLength*(text: string): int =
   var i = 0
   while i < text.len:
     let c = text[i]
-    if i + 2 < text.high and c == '<' and (text[i+2] == '>' or text[i+3] == '>'):
-      i += (if text[i+2] == '>': 3 else: 4)
+    if c == '<':
+      # scan foward until '>'
+      var k = i + 1
+      if text[k] == '<':
+        result += glyphWidth(c)
+        continue
+      while k < text.len:
+        if text[k] == '>':
+          break
+        k += 1
+      let code = text[i+1..k-1]
+      if code.startsWith("spr"):
+        var sprId: int
+        var (sw,sh) = spriteSize()
+        if scanf(code, "spr($i,$i,$i)", sprId, sw, sh):
+          result += sw
+        elif scanf(code, "spr($i)", sprId):
+          result += sw
+      i = k + 1
       continue
     i += 1
     result += glyphWidth(c)
@@ -77,10 +95,25 @@ proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool 
   var x = x
   var y = y
 
+  proc output(c: char, tlen: int) =
+    if shadow:
+      printShadow($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
+    else:
+      print($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
+    x += glyphWidth(c)
+
   for text in text.split('\n'):
     let tlen = richPrintLength(text)
 
     let startColor = getColor()
+
+    #setColor(27)
+    #if align == taCenter:
+    #  rect(x - tlen div 2,y,x+tlen-1 - tlen div 2,y+fontHeight()-1)
+    #else:
+    #  rect(x,y,x+tlen-1,y+fontHeight()-1)
+    #setColor(startColor)
+
     var i = 0
     var j = 0
     while i < text.len:
@@ -88,17 +121,35 @@ proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool 
         break
 
       let c = text[i]
-      if i + 2 < text.len and c == '<' and (text[i+2] == '>' or text[i+3] == '>'):
-        let colStr = if text[i+2] == '>': text[i+1..i+1] else: text[i+1..i+2]
-        let col = try: parseInt(colStr) except ValueError: startColor
-        setColor(col)
-        i += (if text[i+2] == '>': 3 else: 4)
+      if c == '<':
+        if i+1 < text.high and text[i+1] == '<':
+          echo "found escaped <<"
+          output(c, tlen)
+          i += 2
+          continue
+        var k = i + 1
+        while k < text.len:
+          if text[k] == '>':
+            break
+          k += 1
+        let code = text[i+1..k-1]
+        if code == "/":
+          setColor(startColor)
+        elif code.startsWith("spr"):
+          var sprId: int
+          var (sw,sh) = spriteSize()
+          if scanf(code, "spr($i,$i,$i)", sprId, sw, sh):
+            spr(sprId, x - (if align == taCenter: tlen div 2 elif align == taRight: tlen else: 0), y)
+            x += sw
+          elif scanf(code, "spr($i)", sprId):
+            spr(sprId, x - (if align == taCenter: tlen div 2 elif align == taRight: tlen else: 0), y)
+            x += sw
+        else:
+          let col = try: parseInt(code) except ValueError: startColor
+          setColor(col)
+        i = k + 1
         continue
-      if shadow:
-        printShadow($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
-      else:
-        print($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
-      x += glyphWidth(c)
+      output(c, tlen)
       i += 1
       if c != ' ':
         j += 1
