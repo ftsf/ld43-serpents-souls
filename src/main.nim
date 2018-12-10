@@ -89,11 +89,6 @@ Destiny Deck
   Only hometown? All cities?
 
   eg.
-  Lots of sacrifice one follower -> no gain / light penalty
-
-  Sacrifice one follower -> nada / a follower becomes sick
-  Sacrifice one follower -> nada / all newborns will be sick
-  Sacrifice one follower -> nada / one home is disabled
   Sacrifice one follower -> nada / only one relocate
   Sacrifice one follower -> nada / one less action
   Sacrifice one follower -> nada / a follower becomes sick
@@ -115,6 +110,10 @@ Destiny Deck
 
 const teamColors = [7,18,28]
 const teamColors2 = [4,15,3]
+const ageColors = [15,17,18]
+const ageCardCount = [5,5,5]
+const flashMod = 20
+const flashCmp = 5
 
 const townNames = @[
   "Atencia",
@@ -253,6 +252,7 @@ type
     isHometown: bool
     serpentSouls: int
     serpentSacrificesMade: int
+    nRebelsKilled: int
     nHealed: int
 
   Army = ref object of RootObj
@@ -264,11 +264,16 @@ type
     moved: bool
 
   DestinyCardSettings = ref object of CardSettings
+    age: int
+    omen: bool
     count: int
     event: string
     demand: string
     gain: string
     penalty: string
+    sicknessSpreads: bool
+    rebelsMove: bool
+    rebellionIncreases: bool
     checkDemand: proc(c: Card, town: Town): bool
     onStartTurn: proc(c: Card, town: Town)
     onEndTurn: proc(c: Card, town: Town)
@@ -291,17 +296,33 @@ type InputKind = enum
   RearrangeDestiny
 
 # PREPROCS
-proc randomSite(town: Town, match: proc(x: Site): bool): Site =
+proc move*(self: Unit, to: Site) =
+  if site != nil:
+    site.units.delete(site.units.find(self))
+  to.units.add(self)
+  site = to
+
+proc setKind*(self: Unit, newKind: UnitKind) =
+  if self.kind != newKind:
+    var oldKind = self.kind
+    self.kind = newKind
+    self.flash = 5
+    if oldKind == Sick and newKind == Follower:
+      site.town.nHealed += 1
+    if oldKind == Sick and newKind == Follower:
+      site.town.nHealed += 1
+
+proc randomSite(town: Town, match: proc(x: Site): bool = nil): Site =
   var count = 0
   for site in town.sites:
-    if match(site):
+    if match == nil or match(site):
       count += 1
   if count == 0:
     return nil
   let r = rnd(count - 1)
   count = 0
   for site in town.sites:
-    if match(site):
+    if match == nil or match(site):
       if r == count:
         return site
       count += 1
@@ -467,6 +488,7 @@ var destinyDiscardPile: Pile
 var cardHand: Pile
 var currentDestiny: Card
 var showCircleMenu: bool
+var age = 1
 
 var mainMenu: bool
 
@@ -555,22 +577,18 @@ let siteSquare = SiteSettings(name: "Village Center", spr: 8, abilities: @[
   )
 ])
 
-let siteMedic = SiteSettings(name: "Healer's Tent", actionsToBuild: 1, spr: 11, abilities: @[
+let siteHealer = SiteSettings(name: "Healer's Tent", actionsToBuild: 1, spr: 11, abilities: @[
   SiteAbility(name: "Heal Sick", desc: "Convert a Sick into a Follower\nReduce Rebellion", nFollowers: 5, startOfTurn: true, nSick: 1, action: proc(site: Site) =
     for u in site.units:
       if u.kind == Sick:
-        u.kind = Follower
-        u.flash = 5
-        site.town.nHealed += 1
+        u.setKind(Follower)
         site.town.rebellion = max(0, site.town.rebellion - 1)
         break
   ),
   SiteAbility(name: "Heal Sick", desc: "Convert a Sick into a Follower\nReduce Rebellion", nFollowers: 3, nSick: 1, nActions: 1, action: proc(site: Site) =
     for u in site.units:
       if u.kind == Sick:
-        u.kind = Follower
-        u.flash = 5
-        site.town.nHealed += 1
+        u.setKind(Follower)
         site.town.rebellion = max(0, site.town.rebellion - 1)
         break
   ),
@@ -578,9 +596,7 @@ let siteMedic = SiteSettings(name: "Healer's Tent", actionsToBuild: 1, spr: 11, 
     var i = 0;
     for u in site.units:
       if u.kind == Sick:
-        u.kind = Follower
-        u.flash = 5
-        site.town.nHealed += 1
+        u.setKind(Follower)
         site.town.rebellion = max(0, site.town.rebellion - 1)
         i += 1
         if i == 2:
@@ -616,7 +632,7 @@ let siteSerpent = SiteSettings(name: "Serpent Totem", spr: 0, abilities: @[
   )
 ])
 
-let siteChurch = SiteSettings(name: "Temple", desc: "Control the people", spr: 2, actionsToBuild: 2, abilities: @[
+let siteChurch = SiteSettings(name: "Temple", desc: "Control the people", spr: 2, actionsToBuild: 3, abilities: @[
   SiteAbility(name: "Recruit", desc: "Gain 1 follower on any site", nFollowers: 3, nActions: 0, action: proc(site: Site) =
     # gain 1 follower
     inputMode = PlaceUnit
@@ -625,15 +641,10 @@ let siteChurch = SiteSettings(name: "Temple", desc: "Control the people", spr: 2
   SiteAbility(name: "Re-educate", desc: "Convert Rebels into Followers", nFollowers: 5, nRebels: 1, nActions: 1, action: proc(site: Site) =
     for u in site.units:
       if u.kind == Rebel:
-        u.kind = Follower
-        u.flash = 5
+        u.setKind(Follower)
   ),
   SiteAbility(name: "Pacify", desc: "Reduce rebellion by 3", nFollowers: 5, nActions: 2, action: proc(site: Site) =
-    for u in site.units:
-      if u.kind == Follower:
-        site.town.rebellion -= 3
-    if site.town.rebellion < 0:
-      site.town.rebellion = 0
+    site.town.rebellion = max(site.town.rebellion - 3, 0)
   ),
   abilityDemolish,
 ])
@@ -642,15 +653,13 @@ let siteBarracks = SiteSettings(name: "Barracks", desc: "Train soldiers", spr: 3
   SiteAbility(name: "Train", desc: "Convert a Follower\ninto a Soldier", nFollowers: 2, startOfTurn: true, action: proc(site: Site) =
     for u in site.units:
       if u.kind == Follower:
-        u.kind = Soldier
-        u.flash = 5
+        u.setKind(Soldier)
         break
   ),
   SiteAbility(name: "Train", desc: "Convert a Follower\ninto a Soldier", nFollowers: 1, nSoldiers: 3, nActions: 1, action: proc(site: Site) =
     for u in site.units:
       if u.kind == Follower:
-        u.kind = Soldier
-        u.flash = 5
+        u.setKind(Soldier)
         break
   ),
   abilityDemolish,
@@ -673,8 +682,7 @@ let siteGuild = SiteSettings(name: "Shaman Hut", desc: "Train powerful Shaman", 
     # turn a follower into a Shaman
     for u in site.units:
       if u.kind == Follower:
-        u.kind = Shaman
-        u.flash = 5
+        u.setKind(Shaman)
         break
   ),
   SiteAbility(name: "Train Shaman", desc: "Convert 5 Followers into a Shaman", nFollowers: 5, nShamans: 0, nActions: 2, action: proc(site: Site) =
@@ -682,7 +690,7 @@ let siteGuild = SiteSettings(name: "Shaman Hut", desc: "Train powerful Shaman", 
       site.removeFollower()
     for u in site.units:
       if u.kind == Follower:
-        u.kind = Shaman
+        u.setKind(Shaman)
         u.flash = 5
         break
   ),
@@ -696,7 +704,7 @@ let siteSeer = SiteSettings(name: "Seer Hut", desc: "Explore Destiny", spr: 9, a
       let c = destinyPile.drawCard()
       if c != nil:
         moveCard(c, cardHand.pos.vec2f + vec2f(0, i.float32 * 62.0), 0.2 * i.float32) do(cm: CardMove):
-          cardHand.addCard(cm.c)
+          cardHand.add(cm.c)
   ),
   SiteAbility(name: "Delve", desc: "Rearrange the Next 5 Destiny", nShamans: 1, nActions: 3, action: proc(site: Site) =
     inputMode = RearrangeDestiny
@@ -704,13 +712,13 @@ let siteSeer = SiteSettings(name: "Seer Hut", desc: "Explore Destiny", spr: 9, a
       let c = destinyPile.drawCard()
       if c != nil:
         moveCard(c, cardHand.pos.vec2f + vec2f(0, i.float32 * 62.0), 0.2 * i.float32) do(cm: CardMove):
-          cardHand.addCard(cm.c)
+          cardHand.add(cm.c)
   ),
   SiteAbility(name: "Avert", desc: "Draw a new Destiny", nShamans: 1, nActions: 2, action: proc(site: Site) =
     var c = destinyPile.drawCard()
     if c != nil:
       moveCard(currentDestiny, destinyDiscardPile.pos.vec2f, 0) do(cm: CardMove):
-        destinyDiscardPile.addCard(cm.c)
+        destinyDiscardPile.add(cm.c)
       moveCard(c, currentDestiny.pos, 0.2) do(cm: CardMove):
         currentDestiny = cm.c
       currentDestiny = nil
@@ -766,8 +774,8 @@ let siteWatchtower = SiteSettings(name: "Watchtower", desc: "Reduce Rebellion", 
   SiteAbility(name: "Supress Rebellion", desc: "Remove one Rebellion", nSoldiers: 3, nActions: 0, action: proc(site: Site) =
     site.town.rebellion = max(site.town.rebellion - 1, 0)
   ),
-  SiteAbility(name: "Supress Rebellion", desc: "Remove one Rebellion\nper Soldier", nSoldiers: 1, nActions: 1, action: proc(site: Site) =
-    site.town.rebellion = max(site.town.rebellion - site.getSoldierCount(), 0)
+  SiteAbility(name: "Supress Rebellion", desc: "Remove one Rebellion", nSoldiers: 1, nActions: 1, action: proc(site: Site) =
+    site.town.rebellion = max(site.town.rebellion - 1, 0)
   ),
   SiteAbility(name: "Snipe Rebel", desc: "Remove one Rebel", nSoldiers: 1, nActions: 1, action: proc(site: Site) =
     inputMode = SelectUnit
@@ -783,37 +791,28 @@ let siteWatchtower = SiteSettings(name: "Watchtower", desc: "Reduce Rebellion", 
 
 let destinySettings = @[
   DestinyCardSettings(
-    count: 10,
+    age: 1,
+    count: 5,
     demand: "Sacrifice one follower",
     gain: "",
     penalty: "One follower becomes sick",
+    sicknessSpreads: true,
     checkDemand: proc(c: Card, t: Town): bool =
       return t.serpentSacrificesMade >= 1
     ,onEndTurn: proc(c: Card, t: Town) =
       if t.serpentSacrificesMade < 1:
-        var count = 0
-        for site in t.sites:
-          for u in site.units:
-            if u.kind == Follower:
-              count += 1
-        if count == 0:
-          return
-        let r = rnd(count-1)
-        count = 0
-        for site in t.sites:
-          for u in site.units:
-            if u.kind == Follower:
-              if count == r:
-                u.kind = Sick
-                u.flash = 5
-                break
-              count += 1
+        let u = t.randomUnit() do(x: Unit) -> bool: x.kind == Follower
+        if u != nil:
+          u.setKind(Sick)
   ),
   DestinyCardSettings(
-    count: 10,
+    age: 1,
+    count: 5,
     demand: "Sacrifice one follower",
     gain: "",
     penalty: "All newborns become sick",
+    sicknessSpreads: false,
+    rebelsMove: true,
     checkDemand: proc(c: Card, t: Town): bool =
       return t.serpentSacrificesMade >= 1
     ,onStartNextTurn: proc(c: Card, t: Town) =
@@ -821,14 +820,29 @@ let destinySettings = @[
         for site in t.sites:
           for u in site.units:
             if u.kind == Follower and u.age == 0:
-              u.kind = Sick
-              u.flash = 5
+              u.setKind(Sick)
   ),
   DestinyCardSettings(
+    age: 1,
+    count: 5,
+    demand: "Sacrifice one follower",
+    gain: "",
+    penalty: "One less action",
+    rebellionIncreases: true,
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 1
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 1:
+        t.actions -= 1
+  ),
+
+  DestinyCardSettings(
+    age: 2,
     count: 5,
     demand: "Sacrifice two followers",
     gain: "",
     penalty: "All newborns become sick",
+    sicknessSpreads: true,
     checkDemand: proc(c: Card, t: Town): bool =
       return t.serpentSacrificesMade >= 2
     ,onStartNextTurn: proc(c: Card, t: Town) =
@@ -836,25 +850,16 @@ let destinySettings = @[
         for site in t.sites:
           for u in site.units:
             if u.kind == Follower and u.age == 0:
-              u.kind = Sick
+              u.setKind(Sick)
               u.flash = 5
   ),
   DestinyCardSettings(
-    count: 5,
-    demand: "Sacrifice one follower",
-    gain: "",
-    penalty: "One less action",
-    checkDemand: proc(c: Card, t: Town): bool =
-      return t.serpentSacrificesMade >= 1
-    ,onStartNextTurn: proc(c: Card, t: Town) =
-      if t.serpentSacrificesMade < 1:
-        t.actions -= 1
-  ),
-  DestinyCardSettings(
+    age: 1,
     count: 5,
     demand: "Sacrifice one follower",
     gain: "",
     penalty: "One home disabled",
+    rebelsMove: true,
     checkDemand: proc(c: Card, t: Town): bool =
       return t.serpentSacrificesMade >= 1
     ,onEndTurn: proc(c: Card, t: Town) =
@@ -867,10 +872,12 @@ let destinySettings = @[
           echo "no home found"
   ),
   DestinyCardSettings(
+    age: 1,
     count: 5,
     demand: "Sacrifice one follower",
     gain: "",
     penalty: "All homes blocked",
+    rebelsMove: true,
     checkDemand: proc(c: Card, t: Town): bool =
       return t.serpentSacrificesMade >= 1
     ,onEndTurn: proc(c: Card, t: Town) =
@@ -880,10 +887,12 @@ let destinySettings = @[
             site.blocked += 1
   ),
   DestinyCardSettings(
+    age: 1,
     count: 5,
     demand: "Sacrifice one follower",
     gain: "",
     penalty: "One Rebel appears",
+    rebelsMove: true,
     checkDemand: proc(c: Card, t: Town): bool =
       return t.serpentSacrificesMade >= 1
     ,onStartNextTurn: proc(c: Card, t: Town) =
@@ -892,6 +901,7 @@ let destinySettings = @[
         randomSite.units.add(newUnit(Rebel, randomSite))
   ),
   DestinyCardSettings(
+    age: 2,
     count: 5,
     demand: "Sacrifice two followers",
     gain: "",
@@ -905,6 +915,7 @@ let destinySettings = @[
           randomSite.units.add(newUnit(Rebel, randomSite))
   ),
   DestinyCardSettings(
+    age: 2,
     count: 5,
     demand: "Sacrifice two followers",
     gain: "Gain an extra action",
@@ -930,6 +941,7 @@ let destinySettings = @[
         t.actions += 1
   ),
   DestinyCardSettings(
+    age: 1,
     count: 5,
     event: "2 Sick arrive",
     demand: "Heal 1 Sick",
@@ -945,12 +957,12 @@ let destinySettings = @[
       if t.nHealed < 1:
         let unit = t.randomUnit() do(x: Unit) -> bool: x.kind == Follower
         if unit != nil:
-          unit.kind = Sick
-          unit.flash = 5
+          unit.setKind(Sick)
       else:
         t.actions += 1
   ),
   DestinyCardSettings(
+    age: 2,
     count: 2,
     event: "5 Sick arrive",
     demand: "Heal 2 Sick",
@@ -977,13 +989,118 @@ let destinySettings = @[
               for u in site.units:
                 if u.kind == Follower:
                   if r == count:
-                    u.kind = Sick
-                    u.flash = 5
+                    u.setKind(Sick)
                     break
                 count += 1
       else:
         t.actions += 1
   ),
+]
+
+let destinyOmens = @[
+  DestinyCardSettings(
+    age: 1,
+    omen: true,
+    count: 1,
+    event: "1 Rebel appears",
+    demand: "Kill one Rebel",
+    penalty: "3 Rebels appear",
+    onStartTurn: proc(c: Card, t: Town) =
+      let site = rnd(t.sites)
+      site.units.add(newUnit(Rebel, site))
+    ,
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.nRebelsKilled >= 1
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.nRebelsKilled < 1:
+        for i in 0..<3:
+          let site = rnd(t.sites)
+          site.units.add(newUnit(Rebel, site))
+  ),
+  DestinyCardSettings(
+    age: 1,
+    omen: true,
+    count: 1,
+    event: "1 Sick appears",
+    demand: "Heal one sick",
+    penalty: "5 Sick appear",
+    onStartTurn: proc(c: Card, t: Town) =
+      let site = rnd(t.sites)
+      site.units.add(newUnit(Sick, site))
+    ,
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.nHealed >= 1
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.nHealed < 1:
+        for i in 0..<5:
+          let site = rnd(t.sites)
+          site.units.add(newUnit(Sick, site))
+  ),
+  DestinyCardSettings(
+    age: 1,
+    omen: true,
+    count: 1,
+    demand: "Sacrifice 3 Followers",
+    penalty: "5 Followers become Sick",
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 3
+    ,onEndTurn: proc(c: Card, t: Town) =
+      for i in 0..<3:
+        let u = t.randomUnit() do(x: Unit) -> bool: x.kind == Follower
+        if u != nil:
+          u.setKind(Sick)
+  ),
+  DestinyCardSettings(
+    age: 2,
+    omen: true,
+    count: 1,
+    event: "5 Rebels appear",
+    demand: "Kill 3 Rebels",
+    penalty: "Home becomes Rebel Base",
+    onStartTurn: proc(c: Card, t: Town) =
+      for i in 0..<5:
+        let site = rnd(t.sites)
+        site.units.add(newUnit(Rebel, site))
+    ,
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.nRebelsKilled >= 3
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.nRebelsKilled < 3:
+        var count = 0
+        for site in t.sites:
+          if site.settings == siteHouse:
+            count += 1
+        if count > 0:
+          let r = rnd(count)
+          count = 0
+          for site in t.sites:
+            if site.settings == siteHouse:
+              if r == count:
+                site.settings = siteRebelBase
+                break
+              count += 1
+  ),
+  DestinyCardSettings(
+    age: 2,
+    omen: true,
+    count: 1,
+    event: "7 Sick appear",
+    demand: "Sacrifice 5 Followers",
+    penalty: "All Healing Huts Disabled",
+    onStartTurn: proc(c: Card, t: Town) =
+      for i in 0..<7:
+        let site = rnd(t.sites)
+        site.units.add(newUnit(Sick, site))
+    ,
+    checkDemand: proc(c: Card, t: Town): bool =
+      return t.serpentSacrificesMade >= 5
+    ,onStartNextTurn: proc(c: Card, t: Town) =
+      if t.serpentSacrificesMade < 5:
+        for site in t.sites:
+          if site.settings == siteHealer:
+            site.disabled = 1
+  ),
+
 ]
 
 let buildMenu: seq[SiteSettings] = @[
@@ -993,7 +1110,7 @@ let buildMenu: seq[SiteSettings] = @[
   siteChurch,
   siteBarracks,
   siteWatchtower,
-  siteMedic,
+  siteHealer,
   siteSeer,
 ]
 
@@ -1043,7 +1160,7 @@ proc draw(self: Unit, x,y: int) =
   elif hoverUnit == self:
     pal(1,22)
 
-  if pos == targetPos and flash > 0 and frame mod 4 < 2:
+  if pos == targetPos and flash > 0 and frame mod flashMod < flashCmp:
     pal(1, 21)
     flash -= 1
 
@@ -1110,7 +1227,7 @@ proc draw(self: Site, x,y: int) =
     spr(settings.spr, x + 8, y + 1)
 
   # border
-  setColor(if self.disabled > 0: 27 elif self.blocked > 0: 0 elif self.used or available == false: 24 else: 8)
+  setColor(if self.disabled > 0: 27 elif self.blocked > 0: 0 elif self.used or available == false: 15 else: 8)
   if self == selectedSite:
     rrect(x-1, y-1, x + 49, y + 49)
     rect(x, y, x + 48, y + 48)
@@ -1356,17 +1473,29 @@ method draw(self: DestinyCardSettings, c: Card, pos: Vec2f) =
 
   G.center = false
 
-  G.beginArea(pos.x, pos.y, 165, 60, gTopToBottom, true)
+  if omen:
+    G.normalColor = 27
+  else:
+    G.normalColor = ageColors[age-1]
+
+  G.beginArea(pos.x, pos.y, 165, 80, gTopToBottom, true)
+
+  #setSpritesheet(0)
+  #var x = pos.x + 165 div 2 - age * 8
+  #for i in 0..<age:
+  #  G.ssprite(56, x, pos.y.int + 40 - 8, 16, 16, 2, 2)
+  #  x += 16
 
   if event != "":
     G.textColor = teamColors[1]
     G.label(event)
     G.textColor = 22
+
   if demand != "":
     if passed:
       G.label("Demand: <18>" & demand)
     else:
-      if currentDestiny == c and hoveringOverEndTurn and frame mod 4 < 2:
+      if currentDestiny == c and hoveringOverEndTurn and frame mod flashMod < flashCmp:
         G.label("Demand: <21>" & demand)
       else:
         G.label("Demand: <27>" & demand)
@@ -1381,15 +1510,29 @@ method draw(self: DestinyCardSettings, c: Card, pos: Vec2f) =
     else:
       G.label("Or: " & penalty)
 
+  if sicknessSpreads:
+    G.label("Sickness spreads: <spr(6,5,8)><spr(1,5,8)><spr(12)><spr(6,5,8)><spr(6,5,8)>")
+  if rebelsMove:
+    G.label("Rebels move: <spr(3)><spr(12)><spr(3)>")
+  if rebellionIncreases:
+    G.label("Rebellion increases: <spr(3)><spr(13)><spr(10)>")
+
   G.endArea()
 
 method drawBack(self: DestinyCardSettings, c: Card, pos: Vec2f) =
   G.center = false
 
-  G.beginArea(pos.x, pos.y, 165, 60, gTopToBottom, true)
+  if omen:
+    G.normalColor = 27
+  else:
+    G.normalColor = ageColors[age-1]
+  G.beginArea(pos.x, pos.y, 165, 80, gTopToBottom, true)
 
   setSpritesheet(0)
-  G.ssprite(56, pos.x.int + 165 div 2 - 8, pos.y.int + 30 - 8, 16, 16, 2, 2)
+  var x = pos.x + 165 div 2 - age * 8
+  for i in 0..<age:
+    G.ssprite(56, x, pos.y.int + 40 - 8, 16, 16, 2, 2)
+    x += 16
 
   G.endArea()
 
@@ -1426,6 +1569,50 @@ proc expand(self: Town) =
       if site == nil:
         site = newSite(self, siteEmpty, i mod 5, i div 5)
 
+proc fillDestiny() =
+  let ageDeck = newPile("", pkHidden)
+  block dealCards:
+    for ds in destinySettings:
+      if ds.age == age and ds.omen == false:
+        for i in 0..<ds.count:
+          ageDeck.add(newCard(ds))
+
+  ageDeck.shuffle()
+  ageDeck.shuffle()
+  ageDeck.shuffle()
+
+  for i in 0..<ageCardCount[age-1]:
+    destinyPile.add(ageDeck.drawCard())
+
+  for c in destinyDiscardPile:
+    destinyPile.add(c)
+
+  destinyDiscardPile.clear()
+
+  destinyPile.shuffle()
+  destinyPile.shuffle()
+  destinyPile.shuffle()
+
+  var omens = newSeq[DestinyCardSettings]()
+  for ds in destinyOmens:
+    if ds.age == age:
+      omens.add(ds)
+
+  for i in 0..<age:
+    if omens.len == 0:
+      break
+    var omen = rnd(omens)
+    destinyPile.addBottom(newCard(omen))
+    omens.delete(omens.find(omen))
+
+  if age > 1:
+    destinyPile.shuffle()
+
+  var top = destinyPile.peek()
+  if top != nil:
+    while (DestinyCardSettings)(top.settings).omen:
+      destinyPile.shuffle()
+      top = destinyPile.peek()
 
 proc startTurn() =
   turnPhase = phaseStartOfTurn
@@ -1461,20 +1648,27 @@ proc startTurn() =
           ds.onStartNextTurn(currentDestiny, town)
     var c = currentDestiny
     moveCard(c, destinyDiscardPile.pos.vec2f, 0) do(cm: CardMove):
-      destinyDiscardPile.addCard(cm.c)
+      destinyDiscardPile.add(cm.c)
     currentDestiny = nil
 
   for town in towns:
     town.serpentSacrificesMade = 0
     town.nHealed = 0
+    town.nRebelsKilled = 0
     town.startingActions = town.actions
 
   # draw one destiny card
   var c = destinyPile.drawCard()
   if c == nil:
-    echo "destiny pile is empty"
-  else:
-    moveCard(c, vec2f(screenWidth div 4 + 10, screenHeight - 62), 0) do(cm: CardMove):
+    age += 1
+    if age > 3:
+      age = 3
+    fillDestiny()
+
+    c = destinyPile.drawCard()
+
+  if c != nil:
+    moveCard(c, vec2f(screenWidth div 4 + 10, screenHeight - 82), 0) do(cm: CardMove):
       currentDestiny = c
       let ds = currentDestiny.settings.DestinyCardSettings
       if ds.onStartTurn != nil:
@@ -1487,20 +1681,31 @@ proc endTurn() =
 
   undoStack = @[]
 
-  for town in towns:
-    #spread sickness
-    var nSick = min(town.getSickCount(), 1)
-    for i in 0..<nSick:
-      # convert a follower or soldier to sick
-      let site = rnd(town.sites)
-      if site.units.len > 0:
-        let unit = rnd(site.units)
-        if unit.kind == Sick:
-          unit.hp = 0
-        elif unit.kind == Follower or unit.kind == Rebel:
-          unit.kind = Sick
-          unit.flash = 5
+  if currentDestiny != nil:
+    let ds = currentDestiny.settings.DestinyCardSettings
+    if ds.sicknessSpreads:
+      for town in towns:
+        # spread sickness
+        var nSick = town.getSickCount()
+        if nSick > 0:
+          echo town.name, " Sickness spreads: ", nSick
+          for i in 0..<nSick:
+            # convert a follower or soldier to sick
+            let target = town.randomUnit() do(x: Unit) -> bool: x.kind == Follower or x.kind == Soldier
+            if target != nil:
+                target.setKind(Sick)
+    # TODO fix rebels move
+    #if ds.rebelsMove:
+    #  for town in towns:
+    #    for site in town.sites:
+    #      var rebels: seq[Unit] = @[]
+    #      for u in site.units:
+    #        if u.kind == Rebel:
+    #          rebels.add(u)
+    #      for u in rebels:
+    #        u.move(town.randomSite())
 
+  for town in towns:
     # remove statuses
     for site in town.sites:
       if site.disabled > 0:
@@ -1629,23 +1834,18 @@ proc gameInit() =
   loadMap(0, "map.json")
   setMap(0)
 
+  age = 1
   particles = @[]
   towns = @[]
   armies = @[]
   destinyPile = newPile("Destiny", pkAllFaceDown)
-  destinyPile.pos = vec2i(2, screenHeight - 62)
+  destinyPile.pos = vec2i(2, screenHeight - 82)
   destinyDiscardPile = newPile("Destiny Discard", pkHidden)
   destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
   cardHand = newPile("Hand", pkAllFaceOpen)
   cardHand.pos = vec2i(2,3)
 
-  for ds in destinySettings:
-    for i in 0..<ds.count:
-      destinyPile.addCard(newCard(ds))
-
-  destinyPile.shuffle()
-  destinyPile.shuffle()
-  destinyPile.shuffle()
+  fillDestiny()
 
   turn = 0
   time = 0.0
@@ -1941,7 +2141,7 @@ proc gameGui() =
         for i in 0..<cardHand.len:
           var c = cardHand.drawCard()
           moveCard(c, destinyPile.pos.vec2f, 0.2 * i.float32) do(cm: CardMove):
-            destinyPile.addCard(cm.c)
+            destinyPile.add(cm.c)
     else:
       G.empty(100, 28)
 
@@ -1978,11 +2178,11 @@ proc gameGui() =
     G.label("The Village of " & currentTown.name)
     setFont(0)
     G.textColor = 22
-    G.empty(42,0)
-    G.label("Day " & $turn)
+    G.empty(32,0)
+    G.label("Age " & $age & "  Day " & $turn & "/" & $ageCardCount[age-1])
     G.endArea()
 
-    if (actionFlash > 0 or (hoveringOverEndTurn and currentTown.actions > 0)) and frame mod 4 < 2:
+    if (actionFlash > 0 or (hoveringOverEndTurn and currentTown.actions > 0)) and frame mod flashMod < flashCmp:
       pal(1,21)
       actionFlash -= 1
     var actionsStr = "Actions: "
@@ -1993,9 +2193,12 @@ proc gameGui() =
     G.label(actionsStr)
     pal()
 
-    if rebellionFlash > 0 and frame mod 4 < 2:
+    let newRebels = clamp(currentTown.rebellion div 5, 0, 3 + currentTown.size)
+    if (rebellionFlash > 0 or (newRebels > 0 and hoveringOverEndTurn)) and frame mod flashMod < flashCmp:
       pal(1,27)
-      rebellionFlash -= 1
+      if rebellionFlash > 0:
+        rebellionFlash -= 1
+
     var rebellionStr = "Rebellion: "
     var rebellionRemaining = currentTown.rebellion
     while rebellionRemaining > 0:
@@ -2017,7 +2220,6 @@ proc gameGui() =
         rebellionStr &= "<spr(10,6,8)>"
         plusRebellion -= 1
 
-    let newRebels = clamp(currentTown.rebellion div 5, 0, 3 + currentTown.size)
     if newRebels > 0:
       rebellionStr &= " <spr(12,7,8)> "
     for i in 0..<newRebels:
@@ -2094,6 +2296,10 @@ proc gameUpdate(dt: float32) =
 
   for town in towns:
     for site in town.sites:
+      for u in site.units:
+        if u.hp <= 0:
+          if u.kind == Rebel:
+            town.nRebelsKilled += 1
       site.units.keepItIf(it.hp > 0)
 
   if currentTown != nil:
@@ -2192,7 +2398,7 @@ proc gameUpdate(dt: float32) =
                 for s in currentTown.sites:
                   for u in s.units:
                     if u.kind == Neutral:
-                      u.kind = Rebel
+                      u.setKind(Rebel)
                       u.flash = 5
               currentTown.team = 1
               undoStack = @[]
@@ -2324,7 +2530,7 @@ proc gameDraw() =
       pal()
 
       if town == currentTown:
-        let nActions = 3 + town.size
+        let nActions = 3
         for i in 0..<nActions*2:
           let angle = (TAU / (nActions*2).float32) * i.float32 + time
           setColor(21)
@@ -2335,7 +2541,7 @@ proc gameDraw() =
               setColor(1)
           circfill(town.pos.x * 8 + 4 + cos(angle) * 8, town.pos.y * 8 + 4 + sin(angle) * 8, 2)
       elif town.team == 1:
-        let nActions = 3 + town.size
+        let nActions = 3
         for i in 0..<nActions*2:
           let angle = (TAU / (nActions*2).float32) * i.float32
           setColor(21)

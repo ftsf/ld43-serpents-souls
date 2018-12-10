@@ -64,8 +64,16 @@ proc drawCard*(self: Pile): Card =
     return nil
   return cards.popLast()
 
-proc addCard*(self: Pile, c: Card) =
+proc peek*(self: Pile): Card =
+  if cards.len == 0:
+    return nil
+  return self.cards[self.cards.len - 1]
+
+proc add*(self: Pile, c: Card) =
   cards.addLast(c)
+
+proc addBottom*(self: Pile, c: Card) =
+  cards.addFirst(c)
 
 proc shuffle*(self: Pile) =
   var stacks: array[3,Deque[Card]]
@@ -129,16 +137,19 @@ proc drawBack*(self: Card, pos: Vec2f) =
   settings.drawBack(self, pos)
 
 proc draw*(self: Pile) =
+  if kind != pkHidden:
+    setColor(0)
+    rrectfill(pos.x - 3, pos.y - 2 , pos.x + 165 + 2, pos.y + 80 + 2)
   var y = pos.y
   for i,c in cards:
     if kind == pkHidden:
       c.pos = vec2f(pos.x, pos.y)
     elif kind == pkAllFaceUp or kind == pkAllFaceOpen or (kind == pkTopFaceUp and i == cards.len - 1):
       c.draw(vec2f(pos.x, y))
-      y += (if kind == pkAllFaceOpen: 60 else: -1)
+      y += (if kind == pkAllFaceOpen: 60 else: -2)
     else:
       c.drawBack(vec2f(pos.x, y))
-      y += -1
+      y += -2
 
 proc drawCards*() =
   for cm in cardMoves:
@@ -146,6 +157,9 @@ proc drawCards*() =
 
 proc len*(self: Pile): int =
   self.cards.len
+
+proc clear*(self: Pile) =
+  self.cards.clear()
 
 iterator items*(self: Pile): Card =
   for c in self.cards:
