@@ -1,14 +1,16 @@
 APPNAME=ld43
-NICO="-p:../nico"
 
 web:
-	nim js $(NICO) -d:debug -o:$(APPNAME).js src/main.nim
+	nim js -o:${APPNAME}.js src/main.nim
 
 webr:
-	nim js $(NICO) -d:release -o:${APPNAME}.js src/main.nim
+	nim js -d:release -o:${APPNAME}.js src/main.nim
 
 rund:
-	nim c $(NICO) -d:gif -r -d:debug -o:${APPNAME}d src/main.nim
+	nim c -d:gif -r -o:${APPNAME}d src/main.nim
 
 run:
-	nim c $(NICO) -d:gif -r -d:release -o:${APPNAME} src/main.nim
+	nim c -d:gif -r -d:release -o:${APPNAME} src/main.nim
+
+runp:
+	nim c --profiler:on --stackTrace:on -r -d:release -o:${APPNAME}p src/main.nim

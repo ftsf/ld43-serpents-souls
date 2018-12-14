@@ -76,6 +76,8 @@ proc addBottom*(self: Pile, c: Card) =
   cards.addFirst(c)
 
 proc shuffle*(self: Pile) =
+  if self.cards.len == 0:
+    return
   var stacks: array[3,Deque[Card]]
   var nStacks = 3
   for i in 0..<nStacks:
@@ -119,6 +121,9 @@ proc updateCards*(dt: float32): bool =
       else:
         cm.c.pos = lerp(cm.source, cm.dest, easeInOutQuad(t))
   cardMoves.keepItIf(it.alpha < 1.0)
+  return cardMoves.len > 0
+
+proc cardsMoving*(): bool =
   return cardMoves.len > 0
 
 proc draw*(self: Card) =

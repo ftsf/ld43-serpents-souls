@@ -1,3 +1,7 @@
+{.experimental: "codeReordering".}
+
+#import nimprof
+
 import nico
 import nico/vec
 import utils
@@ -108,6 +112,8 @@ Destiny Deck
 
 # CONSTANTS
 
+const cardWidth = 165
+const cardHeight = 80
 const teamColors = [7,18,28]
 const teamColors2 = [4,15,3]
 const ageColors = [15,17,18]
@@ -164,6 +170,8 @@ const townNames = @[
 type
   Particle = object
     pos: Vec2f
+    hasDest: bool
+    dest: Vec2f
     vel: Vec2f
     ttl: float32
     maxTtl: float32
@@ -210,6 +218,8 @@ type
   ShamanAbility = object
     name: string
     desc: string
+    nSoulsToUnlock: int
+    requires: seq[ShamanAbility]
     nActions: int
     nFollowers: int
     nSick: int
@@ -294,6 +304,7 @@ type InputKind = enum
   SelectUnit
   ViewDestiny
   RearrangeDestiny
+  ChooseAbilityToLearn
 
 # PREPROCS
 proc move*(self: Unit, to: Site) =
@@ -353,12 +364,21 @@ proc newParticle*(pos: Vec2f, vel: Vec2f, ttl: float32, sheet: int, startSpr: in
 proc newParticleText*(pos: Vec2f, vel: Vec2f, ttl: float32, text: string, color1,color2: int)
 proc newUnit(kind: UnitKind, site: Site): Unit
 
-proc removeFollower(self: Site) =
+proc removeFollower(self: Site): bool =
   for i,u in units:
     if u.kind == Follower:
       units.delete(i)
       newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
-      return
+      return true
+
+proc killFollower(self: Site): bool =
+  for i,u in units:
+    if u.kind == Follower:
+      u.site.town.rebellion += 1
+      units.delete(i)
+      newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
+      rebellionFlash = 5
+      return true
 
 proc removeShaman(self: Site): Unit =
   for i,u in units:
@@ -503,28 +523,59 @@ var undoStack: seq[Town]
 
 # CONSTANTS 2
 
+# THREE PATHS, HEALER, WARRIOR, ALCHEMIST
+# HEALER -> Healer / Recruiter
+#  * Convert
+#  * Heal
+#  * Heal 2
+#  * Heal Site
+#  * Autoheal
+#  * Homes produce twins
+
+# WARRIOR -> Harvester / Battler
+#  * Kill Rebel
+#  * Round up
+#  * Cleanse
+#  * Kill half on site
+
+# ALCHEMIST
+#  * Refresh site
+#  * Gain action
+#  * Shield site (protect site from kills)
+
 let shamanAbilities = @[
-  ShamanAbility(name: "Sacrifice Follower", desc: "Sacrifice Follower\nto gain a soul", nActions: 0, nFollowers: 1, nSouls: 1, action: proc(unit: Unit, site: Site) =
-    site.removeFollower()
-    site.town.rebellion += 1
-    rebellionFlash = 5
-    unit.souls += 1
+  ShamanAbility(name: "Sacrifice Follower", desc: "Sacrifice Follower\nto gain a soul", nActions: 0, nFollowers: 1, nSouls: 0, action: proc(unit: Unit, site: Site) =
+    if site.killFollower():
+      unit.souls += 1
   ),
-  ShamanAbility(name: "Convert", desc: "Gain a follower on Site", nActions: 1, nSouls: 2, action: proc(unit: Unit, site: Site) =
+  # healer
+  ShamanAbility(name: "Convert", desc: "Gain a Follower on Site", nActions: 1, nSoulsToUnlock: 2, action: proc(unit: Unit, site: Site) =
     site.units.add(newUnit(Follower, site))
   ),
-  ShamanAbility(name: "Cleansing", desc: "Kill all Followers and Sick\non Site. Rebellion x2", nActions: 2, nSouls: 3, action: proc(unit: Unit, site: Site) =
+  ShamanAbility(name: "Heal", desc: "Heal a Follower on Site", nActions: 1, nSick: 1, nSoulsToUnlock: 2, action: proc(unit: Unit, site: Site) =
     for u in site.units:
-      if u.kind == Follower or u.kind == Rebel or u.kind == Sick:
-        unit.souls += 1
-        unit.site.town.rebellion += 2
-        rebellionFlash = 5
+      if u.kind == Sick:
+        u.setKind(Follower)
+        break
+  ),
+  ShamanAbility(name: "Heal 2", desc: "Heal 2 Followers on Site", nActions: 1, nSick: 2, nSoulsToUnlock: 4, action: proc(unit: Unit, site: Site) =
+    var i = 0;
+    for u in site.units:
+      if u.kind == Sick:
+        u.setKind(Follower)
+        i += 1
+        if i == 2:
+          break
+  ),
+  # warrior
+  ShamanAbility(name: "Stab", desc: "Kill 1 Rebel on Site", nActions: 1, nRebels: 1, nSoulsToUnlock: 2, nSouls: 1, action: proc(unit: Unit, site: Site) =
+    for u in site.units:
+      if u.kind == Rebel:
         u.hp = 0
+        unit.souls += 1
+        break
   ),
-  ShamanAbility(name: "Refresh Site", desc: "Allow a site to be used again", nActions: 1, nSouls: 3, action: proc(unit: Unit, site: Site) =
-    site.used = false
-  ),
-  ShamanAbility(name: "Round up", desc: "Relocate up to 3 Rebels from Site", nActions: 1, nRebels: 1, nSouls: 3, action: proc(unit: Unit, site: Site) =
+  ShamanAbility(name: "Round up", desc: "Relocate up to 3 Rebels from Site", nActions: 1, nRebels: 1, nSoulsToUnlock: 3, nSouls: 1, action: proc(unit: Unit, site: Site) =
     var count = 0
     placingUnits = @[]
     for i,u in site.units:
@@ -536,7 +587,15 @@ let shamanAbilities = @[
         if count >= 3:
           break
   ),
-  ShamanAbility(name: "Fireball", desc: "Kills half of the Soldiers\non Site (rounded up)", nSoldiers: 1, nActions: 2, nSouls: 4, action: proc(unit: Unit, site: Site) =
+  ShamanAbility(name: "Cleansing", desc: "Kill all Followers and Sick\non Site. Rebellion x2", nActions: 2, nSoulsToUnlock: 5, nSouls: 2, action: proc(unit: Unit, site: Site) =
+    for u in site.units:
+      if u.kind == Follower or u.kind == Rebel or u.kind == Sick:
+        unit.souls += 1
+        unit.site.town.rebellion += 2
+        rebellionFlash = 5
+        u.hp = 0
+  ),
+  ShamanAbility(name: "Fireball", desc: "Kills half of the Soldiers\non Site (rounded up)", nSoldiers: 1, nSoulsToUnlock: 5, nActions: 2, nSouls: 3, action: proc(unit: Unit, site: Site) =
     var nSoldiers = 0
     for u in site.units:
       if u.kind == Soldier:
@@ -544,6 +603,10 @@ let shamanAbilities = @[
     var toKill = (nSoldiers + 2 - 1) div 2
     for i in 0..<toKill:
       site.removeSoldier()
+  ),
+  # alchemist
+  ShamanAbility(name: "Refresh Site", desc: "Allow a site to be used again", nActions: 1, nSoulsToUnlock: 2, nSouls: 1, action: proc(unit: Unit, site: Site) =
+    site.used = false
   ),
 ]
 
@@ -608,11 +671,9 @@ let siteHealer = SiteSettings(name: "Healer's Tent", actionsToBuild: 1, spr: 11,
 let siteSerpent = SiteSettings(name: "Serpent Totem", spr: 0, abilities: @[
   SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a follower and let their\nsoul flow into the Serpent", nFollowers: 2, nActions: 0, multiUse: true, action: proc(site: Site) =
     # kill 1 follower, capture one soul
-    site.removeFollower()
-    homeTown.serpentSouls += 1
-    site.town.rebellion += 1
-    rebellionFlash = 5
-    homeTown.serpentSacrificesMade += 1
+    if site.killFollower():
+      homeTown.serpentSouls += 1
+      homeTown.serpentSacrificesMade += 1
   ),
   SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a Shaman, all their souls\nwill flow into the Serpent", nFollowers: 1, nShamans: 1, multiUse: true, nActions: 0, action: proc(site: Site) =
     # kill 1 shaman, capture their souls
@@ -628,8 +689,52 @@ let siteSerpent = SiteSettings(name: "Serpent Totem", spr: 0, abilities: @[
   ),
   SiteAbility(name: "Expand Village", desc: "Expands the village from\n3x3 to 5x3 and 5x3 to 5x4", nFollowers: 10, nActions: 3, action: proc(site: Site) =
     site.town.expand()
-
   )
+])
+
+let siteSerpent2 = SiteSettings(name: "Serpent Totem", spr: 12, abilities: @[
+  SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a follower and let their\nsoul flow into the Serpent", nFollowers: 2, nActions: 0, multiUse: true, action: proc(site: Site) =
+    # kill 1 follower, capture one soul
+    if site.killFollower():
+      homeTown.serpentSouls += 1
+      homeTown.serpentSacrificesMade += 1
+  ),
+  SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a Shaman, all their souls\nwill flow into the Serpent", nFollowers: 1, nShamans: 1, multiUse: true, nActions: 0, action: proc(site: Site) =
+    # kill 1 shaman, capture their souls
+    # TODO: select shaman
+    for u in site.units:
+      if u.kind == Shaman:
+        homeTown.serpentSouls += 1
+        homeTown.serpentSouls += u.souls
+        site.town.rebellion += 1
+        rebellionFlash = 5
+        homeTown.serpentSacrificesMade += 1
+        u.hp = 0
+  ),
+  SiteAbility(name: "Expand Village", desc: "Expands the village to\n5x3 Sites", nFollowers: 10, nActions: 4, action: proc(site: Site) =
+    site.town.expand()
+  )
+])
+
+let siteSerpent3 = SiteSettings(name: "Serpent Totem", spr: 13, abilities: @[
+  SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a follower and let their\nsoul flow into the Serpent", nFollowers: 2, nActions: 0, multiUse: true, action: proc(site: Site) =
+    # kill 1 follower, capture one soul
+    if site.killFollower():
+      homeTown.serpentSouls += 1
+      homeTown.serpentSacrificesMade += 1
+  ),
+  SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a Shaman, all their souls\nwill flow into the Serpent", nFollowers: 1, nShamans: 1, multiUse: true, nActions: 0, action: proc(site: Site) =
+    # kill 1 shaman, capture their souls
+    # TODO: select shaman
+    for u in site.units:
+      if u.kind == Shaman:
+        homeTown.serpentSouls += 1
+        homeTown.serpentSouls += u.souls
+        site.town.rebellion += 1
+        rebellionFlash = 5
+        homeTown.serpentSacrificesMade += 1
+        u.hp = 0
+  ),
 ])
 
 let siteChurch = SiteSettings(name: "Temple", desc: "Control the people", spr: 2, actionsToBuild: 3, abilities: @[
@@ -668,11 +773,9 @@ let siteBarracks = SiteSettings(name: "Barracks", desc: "Train soldiers", spr: 3
 let siteAltar = SiteSettings(name: "Altar", desc: "Kill Followers for Actions", spr: 4, actionsToBuild: 1, abilities: @[
   SiteAbility(name: "Motivate", desc: "Sacrifice a follower at\nAltar for an extra action", nFollowers: 2, nActions: 0, action: proc(site: Site) =
     # kill 1 follower, gain 1 action
-    site.removeFollower()
-    site.town.actions += 1
-    site.town.rebellion += 1
-    actionFlash += 5
-    rebellionFlash = 5
+    if site.killFollower():
+      site.town.actions += 1
+      actionFlash += 5
   ),
   abilityDemolish,
 ])
@@ -687,7 +790,7 @@ let siteGuild = SiteSettings(name: "Shaman Hut", desc: "Train powerful Shaman", 
   ),
   SiteAbility(name: "Train Shaman", desc: "Convert 5 Followers into a Shaman", nFollowers: 5, nShamans: 0, nActions: 2, action: proc(site: Site) =
     for i in 0..<4:
-      site.removeFollower()
+      discard site.killFollower()
     for u in site.units:
       if u.kind == Follower:
         u.setKind(Shaman)
@@ -1291,7 +1394,6 @@ proc drawBuildItem(self: SiteSettings, sx, sy, w, h: int, enabled: bool, site: S
 
   y += 10
   x = sx
-  var j = 0
   for i in 0..<actionsToBuild:
     if i >= site.town.actions:
       pal(1,27)
@@ -1401,23 +1503,45 @@ proc draw(self: SiteAbility, sx, sy, w, h: int, enabled: bool, site: Site, index
     print(line, x, y)
     y += 10
 
-proc draw(self: ShamanAbility, sx, sy, w, h: int, enabled: bool, unit: Unit) =
-  var y = sy
+proc draw(self: ShamanAbility, sx, sy, w, h: int, enabled: bool, unit: Unit, index: int) =
+  setSpritesheet(0)
   var x = sx
+  var y = sy
   if startOfTurn:
     setColor(25)
-    richPrint("(start turn)</> " & name, 10, y)
-  elif not enabled:
-    setColor(25)
-    richPrint("<27>(" & $nActions & ")</> " & name & (if multiUse: " <27>multi-use" else: ""), x, y)
+    richPrint("Start of turn: " & name, x, y)
   else:
     setColor(22)
-    richPrint("<8>(" & $nActions & ")</> " & name & (if multiUse: " <8>multi-use" else: ""), x, y)
+    richPrint("<21>" & $(index+1) & "</> " & name, x, y)
+
   y += 10
-
   x = sx
-
   var j = 0
+
+  let site = unit.site
+
+  let followerCount = site.getFollowerCount
+  let shamanCount = site.getShamanCount
+  let rebelCount = site.getRebelCount
+  let soldierCount = site.getSoldierCount
+  let sickCount = site.getSickCount
+
+  for i in 0..<nActions:
+    if i >= site.town.actions:
+      pal(1,27)
+    spr(8, x, y)
+    pal()
+    x += 7
+  if nActions > 0:
+    x += 3
+
+  if unit.usedAbility:
+    pal(1,27)
+  spr(24, x, y)
+  pal()
+  x += 7
+
+  j = 0
   for i in 0..<nSouls:
     spr(7, x, y)
     x += 7
@@ -1427,46 +1551,70 @@ proc draw(self: ShamanAbility, sx, sy, w, h: int, enabled: bool, unit: Unit) =
       j = 0
   x += 3
   for i in 0..<nFollowers:
+    if i >= followerCount:
+      pal(1,27)
     spr(1, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
+  j = 0
   for i in 0..<nShamans:
+    if i >= shamanCount:
+      pal(1,27)
     spr(2, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
+  j = 0
   for i in 0..<nRebels:
+    if i >= rebelCount:
+      pal(1,27)
     spr(3, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
+  j = 0
   for i in 0..<nSoldiers:
+    if i >= soldierCount:
+      pal(1,27)
     spr(4, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
+  j = 0
   for i in 0..<nSick:
+    if i >= sickCount:
+      pal(1,27)
     spr(6, x, y)
+    pal()
     x += 7
     j += 1
     if j == 5:
       x += 3
       j = 0
+
+  if multiUse:
+    setColor(8)
+    print("multi-use", x + 5, y)
 
   y += 10
-
   x = sx
   setColor(23)
-  richPrint(desc, x, y)
+  for line in desc.split("\n"):
+    print(line, x, y)
+    y += 10
 
 method draw(self: DestinyCardSettings, c: Card, pos: Vec2f) =
   let passed = currentDestiny == c and checkDemand(c, currentTown)
@@ -1478,10 +1626,10 @@ method draw(self: DestinyCardSettings, c: Card, pos: Vec2f) =
   else:
     G.normalColor = ageColors[age-1]
 
-  G.beginArea(pos.x, pos.y, 165, 80, gTopToBottom, true)
+  G.beginArea(pos.x, pos.y, cardWidth, cardHeight, gTopToBottom, true)
 
   #setSpritesheet(0)
-  #var x = pos.x + 165 div 2 - age * 8
+  #var x = pos.x + cardWidth div 2 - age * 8
   #for i in 0..<age:
   #  G.ssprite(56, x, pos.y.int + 40 - 8, 16, 16, 2, 2)
   #  x += 16
@@ -1526,10 +1674,10 @@ method drawBack(self: DestinyCardSettings, c: Card, pos: Vec2f) =
     G.normalColor = 27
   else:
     G.normalColor = ageColors[age-1]
-  G.beginArea(pos.x, pos.y, 165, 80, gTopToBottom, true)
+  G.beginArea(pos.x, pos.y, cardWidth, cardHeight, gTopToBottom, true)
 
   setSpritesheet(0)
-  var x = pos.x + 165 div 2 - age * 8
+  var x = pos.x + cardWidth div 2 - age * 8
   for i in 0..<age:
     G.ssprite(56, x, pos.y.int + 40 - 8, 16, 16, 2, 2)
     x += 16
@@ -1561,6 +1709,10 @@ proc expand(self: Town) =
     for i,site in sites.mpairs:
       if site == nil:
         site = newSite(self, siteEmpty, i mod 5, i div 5)
+      elif site.settings == siteSerpent:
+        site.settings = siteSerpent2
+      elif site.settings == siteSerpent2:
+        site.settings = siteSerpent3
   elif size == 2:
     width = 5
     height = 4
@@ -1635,46 +1787,81 @@ proc startTurn() =
         u.site = site
         u.sourceSite = site
         u.age += 1
+        u.usedAbility = false
       for ab in site.settings.abilities:
         if ab.startOfTurn:
           if ab.check(site):
             ab.action(site)
 
   if currentDestiny != nil:
+    # apply old destiny and discard
     let ds = currentDestiny.settings.DestinyCardSettings
     if ds.onStartNextTurn != nil:
       for town in towns:
         if town.team == 1:
           ds.onStartNextTurn(currentDestiny, town)
     var c = currentDestiny
-    moveCard(c, destinyDiscardPile.pos.vec2f, 0) do(cm: CardMove):
-      destinyDiscardPile.add(cm.c)
-    currentDestiny = nil
+    moveCard(c, vec2f(screenWidth div 2 - cardWidth div 2, screenHeight - cardHeight - 20), 0) do(cm: CardMove):
+      moveCard(cm.c, destinyDiscardPile.pos.vec2f, 1.0) do(cm: CardMove):
+        destinyDiscardPile.add(cm.c)
+        currentDestiny = nil
+        # draw one destiny card
 
-  for town in towns:
-    town.serpentSacrificesMade = 0
-    town.nHealed = 0
-    town.nRebelsKilled = 0
-    town.startingActions = town.actions
-
-  # draw one destiny card
-  var c = destinyPile.drawCard()
-  if c == nil:
-    age += 1
-    if age > 3:
-      age = 3
-    fillDestiny()
-
-    c = destinyPile.drawCard()
-
-  if c != nil:
-    moveCard(c, vec2f(screenWidth div 4 + 10, screenHeight - 82), 0) do(cm: CardMove):
-      currentDestiny = c
-      let ds = currentDestiny.settings.DestinyCardSettings
-      if ds.onStartTurn != nil:
         for town in towns:
-          if town.team == 1:
-            ds.onStartTurn(currentDestiny, town)
+          town.serpentSacrificesMade = 0
+          town.nHealed = 0
+          town.nRebelsKilled = 0
+          town.startingActions = town.actions
+
+
+        var c = destinyPile.drawCard()
+        if c == nil:
+          # pile empty, next age and, shuffle it
+          age += 1
+          if age > 3:
+            age = 3
+          fillDestiny()
+
+          c = destinyPile.drawCard()
+
+        if destinyPile.len == 0:
+          # pile empty, next age and, shuffle it
+          age += 1
+          if age > 3:
+            age = 3
+          fillDestiny()
+
+        if c != nil:
+          moveCard(c, vec2f(screenWidth div 2 - cardWidth div 2, screenHeight - cardHeight - 20), 0) do(cm: CardMove):
+            moveCard(cm.c, vec2f(screenWidth div 4 + 10, screenHeight - cardHeight - 2), 1.0) do(cm: CardMove):
+              currentDestiny = cm.c
+              let ds = currentDestiny.settings.DestinyCardSettings
+              if ds.onStartTurn != nil:
+                for town in towns:
+                  if town.team == 1:
+                    ds.onStartTurn(currentDestiny, town)
+
+  if currentDestiny == nil:
+    # draw one destiny card
+    var c = destinyPile.drawCard()
+    if c == nil:
+      age += 1
+      if age > 3:
+        age = 3
+      fillDestiny()
+
+      c = destinyPile.drawCard()
+
+    if c != nil:
+      moveCard(c, vec2f(screenWidth div 4 + 10, screenHeight - cardHeight - 2), 0) do(cm: CardMove):
+        currentDestiny = c
+        let ds = currentDestiny.settings.DestinyCardSettings
+        if ds.onStartTurn != nil:
+          for town in towns:
+            if town.team == 1:
+              ds.onStartTurn(currentDestiny, town)
+
+
 
 proc endTurn() =
   turnPhase = phaseEndOfTurn
@@ -1694,16 +1881,17 @@ proc endTurn() =
             let target = town.randomUnit() do(x: Unit) -> bool: x.kind == Follower or x.kind == Soldier
             if target != nil:
                 target.setKind(Sick)
+
     # TODO fix rebels move
-    #if ds.rebelsMove:
-    #  for town in towns:
-    #    for site in town.sites:
-    #      var rebels: seq[Unit] = @[]
-    #      for u in site.units:
-    #        if u.kind == Rebel:
-    #          rebels.add(u)
-    #      for u in rebels:
-    #        u.move(town.randomSite())
+    if ds.rebelsMove:
+      for town in towns:
+        for site in town.sites:
+          var rebels: seq[Unit] = @[]
+          for u in site.units:
+            if u.kind == Rebel:
+              rebels.add(u)
+          for u in rebels:
+            u.move(town.randomSite())
 
   for town in towns:
     # remove statuses
@@ -1726,7 +1914,7 @@ proc endTurn() =
       gameInit()
     return
 
-  if homeTotem.settings != siteSerpent:
+  if homeTotem.settings != siteSerpent and homeTotem.settings != siteSerpent2 and homeTotem.settings != siteSerpent3:
     dialogYesNo("Your cult has been destroyed") do:
       gameInit()
     return
@@ -1750,7 +1938,7 @@ proc endTurn() =
         site.removeRebel()
       for i in 0..<nRebels:
         if site.removeSoldier() == nil:
-          site.removeFollower()
+          discard site.removeFollower()
 
     for site in town.sites:
       if site.settings != siteRebelBase:
@@ -1839,7 +2027,7 @@ proc gameInit() =
   towns = @[]
   armies = @[]
   destinyPile = newPile("Destiny", pkAllFaceDown)
-  destinyPile.pos = vec2i(2, screenHeight - 82)
+  destinyPile.pos = vec2i(2, screenHeight - cardHeight - 2)
   destinyDiscardPile = newPile("Destiny Discard", pkHidden)
   destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
   cardHand = newPile("Hand", pkAllFaceOpen)
@@ -2029,7 +2217,30 @@ proc gameGui() =
 
   hoveringOverAbility = false
 
-  if inputMode == SelectSiteToBuild:
+  if inputMode == ChooseAbilityToLearn:
+    var shaman = selectedUnit
+    G.label("Choose Skill to Learn")
+    G.center = false
+    var i = 0
+    for a in shamanAbilities:
+      if a in shaman.abilities:
+        continue
+      if not a.requires.allIt(it in shaman.abilities):
+        continue
+      let keycode = (K_1.int + i).Keycode
+      if G.button("<21>" & $(i+1) & "</> " & a.name & "\n" & "<spr(7,6,8)>".repeat(a.nSoulsToUnlock), shaman.souls >= a.nSoulsToUnlock, keycode):
+        inputMode = SelectSite
+        shaman.site.town.actions -= a.nActions
+        shaman.souls -= a.nSoulsToUnlock
+        shaman.abilities.add(a)
+        shaman.usedAbility = true
+      i += 1
+
+    G.empty(10,10)
+    if G.button("<21>C</>ancel", true, K_C):
+      inputMode = SelectSite
+
+  elif inputMode == SelectSiteToBuild:
     G.label("Select new Site to Build")
     for i, building in buildMenu:
       let keycode = (K_1.int + i).Keycode
@@ -2045,25 +2256,27 @@ proc gameGui() =
         inputMode = SelectSite
 
         if forcedLabour:
-          selectedSite.removeFollower()
-          currentTown.rebellion += 1
-          rebellionFlash = 5
+          discard selectedSite.killFollower()
 
     G.empty(10,10)
-    if G.button("Cancel building", true, K_ESCAPE):
+    if G.button("<21>C</>ancel", true, K_C):
       inputMode = SelectSite
       selectedSite.used = false
 
   elif selectedUnit != nil:
     G.label("Shaman")
     if selectedUnit.usedAbility:
-      G.label("Already used this turn")
+      G.label("<spr(25)>")
+    else:
+      G.label("<spr(24)>")
 
+    G.label("<spr(7,6,8)>".repeat(selectedUnit.souls))
     G.center = false
     var i = 0
     for a in selectedUnit.abilities:
-      let ret = G.button(148, 50, placingUnits.len == 0 and a.check(selectedUnit)) do(x,y,w,h: int, enabled: bool):
-        a.draw(x,y,w,h,enabled,selectedUnit)
+      let keycode = (K_1.int + i).Keycode
+      let ret = G.button(148, 50, placingUnits.len == 0 and a.check(selectedUnit), keycode) do(x,y,w,h: int, enabled: bool):
+        a.draw(x,y,w,h,enabled,selectedUnit, i)
       if ret:
         saveUndo()
         a.action(selectedUnit, selectedSite)
@@ -2073,8 +2286,8 @@ proc gameGui() =
         hoveringOverAbility = true
       i += 1
     if i < 4:
-      if G.button("Learn new ability", 148, 50):
-        discard
+      if G.button("<spr(24)> Learn new <21>S</>kill", 148, 20, selectedUnit.usedAbility == false, K_S):
+        inputMode = ChooseAbilityToLearn
 
     G.hExpand = false
 
@@ -2190,6 +2403,15 @@ proc gameGui() =
       actionsStr &= "<spr(8)>"
     for i in currentTown.actions..<currentTown.startingActions:
       actionsStr &= "<spr(9)>"
+    var nShamanActions = 0
+    actionsStr &= " "
+    for site in currentTown.sites:
+      for u in site.units:
+        if u.kind == Shaman:
+          if u.usedAbility == false:
+            actionsStr &= "<spr(24)>"
+          else:
+            actionsStr &= "<spr(25)>"
     G.label(actionsStr)
     pal()
 
@@ -2236,7 +2458,9 @@ proc gameGui() =
 
   # draw cards and piles
 
+  destinyPile.pos = vec2i(2, screenHeight - cardHeight - 2)
   destinyPile.draw()
+  destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
   destinyDiscardPile.draw()
 
   if currentDestiny != nil and currentTown != nil:
@@ -2258,13 +2482,13 @@ proc gameUpdate(dt: float32) =
 
   case turnPhase:
     of phaseStartOfTurn:
-      if phaseTimer >= 0:
+      if phaseTimer >= 0 and not cardsMoving():
         phaseTimer -= dt
         if phaseTimer < 0:
           turnPhase = phaseTurn
       return
     of phaseEndOfTurn:
-      if phaseTimer >= 0:
+      if phaseTimer >= 0 and not cardsMoving():
         phaseTimer -= dt
         if phaseTimer < 0:
           startTurn()
@@ -2627,10 +2851,16 @@ proc gameDraw() =
     # cursor
     pal(29,0)
     setSpritesheet(0)
-    if inputMode == SelectUnit:
-      spr(33, mx - 4, my - 4)
+    if phaseTimer > 0:
+      spr(34 + (frame.int div 10 mod 4), mx - 4, my - 4)
+    elif G.downElement != 0:
+      spr(40, mx - 1, my - 1)
+    elif G.hoverElement != 0:
+      spr(39, mx - 1, my - 1)
     elif inputMode == Relocate or inputMode == PlaceUnit:
-      spr(32, mx, my)
+      spr(if hoverUnit == nil: 38 else: 41, mx - 4, my - 7)
+    elif inputMode == SelectUnit:
+      spr(33, mx - 4, my - 4)
     else:
       spr(0, mx, my)
     pal()
@@ -2640,11 +2870,14 @@ proc gameDraw() =
     var y = 0
     for i in countdown(placingUnits.high,0):
       let u = placingUnits[i]
-      u.draw(mx + 7 + x, my + 7 + y)
-      x += 6
-      if x >= 6 * 5:
-        x = 0
-        y += 8
+      if i == placingUnits.high and hoverUnit == nil: # show first unit under cursor
+        u.draw(mx - 4, my)
+      else:
+        u.draw(mx + 7 + x, my - 7 + y)
+        x += 6
+        if x >= 6 * 5:
+          x = 0
+          y += 8
 
 # INIT
 nico.init("impbox", "Serpent's Souls")
@@ -2660,9 +2893,10 @@ loadSfx(2, "sfx/grab.ogg")
 
 setKeyMap("Left:Left,A;Right:Right,D;Up:Up,W;Down:Down,S;A:Z,1;B:X,2;X:C,3;Y:V,4;L1:B,5;L2:H;R1:M;R2:<;Start:Space,Return;Back:Escape")
 nico.createWindow("ld43", 1920 div 3, 1080 div 3, 2)
+#nico.createWindow("ld43", 1080 div 4, 1920 div 4, 2)
 
-fps(60)
-fixedSize(true)
+#fps(60)
+fixedSize(false)
 integerScale(true)
 
 nico.run(gameInit, gameUpdate, gameDraw)
