@@ -9,6 +9,7 @@ import sequtils
 import cards
 import gui
 import times
+import algorithm
 
 import strutils
 
@@ -274,6 +275,7 @@ type
     moved: bool
 
   DestinyCardSettings = ref object of CardSettings
+    tutorial: bool
     age: int
     omen: bool
     count: int
@@ -483,6 +485,7 @@ var time: float32
 var turn: int
 var frame: uint32
 var selectedSite: Site
+var hintSite: Site
 var homeTown: Town
 var homeTotem: Site
 var currentTown: Town
@@ -509,6 +512,7 @@ var cardHand: Pile
 var currentDestiny: Card
 var showCircleMenu: bool
 var age = 1
+var endTurnLocked = false
 
 var mainMenu: bool
 
@@ -522,6 +526,115 @@ var onSelectUnit: proc(unit: Unit) = nil
 var undoStack: seq[Town]
 
 # CONSTANTS 2
+
+type GuideStep = object
+  text: string
+  check: proc(): bool
+  clickNext: bool
+
+let guide = @[
+  GuideStep(text: "The <21>Serpent Totem</> has been completed <21>Great Leader</>!", clickNext: true),
+  GuideStep(text: "Now the Serpent demands <27><s>Blood</>\n<21>we must provide it</>!", clickNext: true),
+  GuideStep(text: "However, we have few Followers(<spr(1)>), so we must gain more!", clickNext: true),
+  GuideStep(text: "Let us build a <21>Home</>\nand have our Followers(<spr(1,5,8)><spr(1,9,8)>) <21>Reproduce</>.", clickNext: true),
+  GuideStep(text: "First, Activate the <21>R</>elocate Ability\nThis uses 1 Action (<spr(8)>) and lets us move any number\nof our Units from any Site to any Site.", check: proc(): bool =
+    G.hintHotkey = K_R
+    return inputMode == Relocate
+  ),
+  GuideStep(text: "Now pick up 3 Followers <spr(1,5,8)><spr(1,5,8)><spr(1,5,8)> from your Serpent Totem.\nClick on a Unit to pick it up.\nWith a Unit in hand, click on a Site to place it.", check: proc(): bool =
+    hintSite = homeTotem
+    return inputMode == Relocate and placingUnits.len == 3
+  ),
+  GuideStep(text: "Place those 3 Followers on an Empty Site", check: proc(): bool =
+    hintSite = nil
+    for site in homeTown.sites:
+      if site.settings == siteEmpty:
+        hintSite = site
+        for a in site.settings.abilities:
+          if a.name == "Build Site" and a.check(site):
+            return true
+  ),
+  GuideStep(text: "Now <21>End Relocation</> to complete this action.", check: proc(): bool =
+    G.hintHotkey = K_R
+    return inputMode == SelectSite
+  ),
+  GuideStep(text: "Select the <21>Empty Site</> with 3 Followers and choose\n<21>Build Site</> and select <21>Home</>. This also costs 1 Action <spr(8)>", check: proc(): bool =
+    var count = 0
+    if selectedSite != nil and selectedSite.settings == siteEmpty and selectedSite.units.len >= 3:
+      G.hintHotkey = K_1
+    else:
+      G.hintHotkey = K_UNKNOWN
+    for site in homeTown.sites:
+      if site.settings == siteHome:
+        count += 1
+    if count >= 2:
+      return true
+  ),
+  GuideStep(text: "You now have 1 Action left <spr(8)>\nUse it to Relocate Followers back to the Serpent Totem.", check: proc(): bool =
+    if inputMode == SelectSite:
+      G.hintHotkey = K_R
+    else:
+      G.hintHotkey = K_UNKNOWN
+    var count = 0
+    for site in homeTown.sites:
+      if site.settings == siteHome:
+        count += 1
+    if count >= 2:
+      return true
+  ),
+  GuideStep(text: "To satisfy the <27>Demand</8> you must Sacrifice one Follower to\nthe Serpent. Otherwise, you will <27>suffer her wrath</>!", clickNext: true),
+  GuideStep(text: "Select the <21>Serpent Totem</> and select\n<21>Sacrifice to Serpent</>, this requires no Actions\nand is <8>multi-use</> (can be used multiple times per turn).\nIt does require 2 Followers (<spr(1)><spr(1)>) to be present.", check: proc(): bool =
+    hintSite = homeTotem
+    if selectedSite != nil and selectedSite.settings == siteSerpent:
+      G.hintHotkey = K_1
+    else:
+      G.hintHotkey = K_UNKNOWN
+    return homeTown.serpentSacrificesMade >= 1
+  ),
+  GuideStep(text: "The Serpent is now Satisfied for this Turn.\nHowever, Killing a Follower increases <27>Rebellion</> (<spr(10)>).", clickNext: true),
+  GuideStep(text: "When <27>Rebellion</> (<spr(10)>) reaches <27>5</>, A <27>Rebel</> (<spr(3)>) will appear.\nRebels will kill Followers at the End of the Turn.", clickNext: true),
+  GuideStep(text: "<27>Rebels</> (<spr(3)>) can be killed by <10>Soldiers</> (<spr(4)>).\nYou will need to build a <21>Barracks</> to Train them.", clickNext: true),
+  GuideStep(text: "<21>Home</>s require 2 Followers to <21>Reproduce</> at the start of each turn.\n<21>Relocate</> excess Followers to the <21>Serpent Totem</>,\nwe have other uses for them.", check: proc(): bool =
+    hintSite = nil
+    if inputMode == SelectSite:
+      G.hintHotkey = K_R
+    elif inputMode == Relocate:
+      G.hintHotkey = K_UNKNOWN
+    for site in homeTown.sites:
+      if site.settings == siteHome:
+        if site.units.len != 2:
+          return false
+    if selectedSite.settings == siteSerpent and selectedSite.units.len == 4:
+      if inputMode != SelectSite:
+        G.hintHotkey = K_R
+      else:
+        return true
+  ),
+  GuideStep(text: "Select your <21>Shaman</> <spr(2)>", check: proc(): bool =
+    selectedUnit != nil and selectedUnit.kind == Shaman
+  ),
+  GuideStep(text: "Sacrfice a Follower to your Shaman", check: proc(): bool =
+    G.hintHotkey = K_1
+    for site in homeTown.sites:
+      for u in site.units:
+        if u.kind == Shaman and u.souls == 2:
+          return true
+  ),
+  GuideStep(text: "This uses your Shaman's Action (<spr(24)>) and gave them a Soul (<spr(7)>).", clickNext: true),
+  GuideStep(text: "Souls (<spr(7)>) can be used to learn new <21>Shaman Skills</>.\nBut you'll need to wait until <21>Next Turn</> to do that.", clickNext: true),
+  GuideStep(text: "You're out of Actions now, so <21>End the Turn</>.", check: proc(): bool =
+    endTurnLocked = false
+    G.hintHotkey = K_E
+    if turn == 2:
+      return true
+  ),
+  GuideStep(text: "Each turn, the Serpent will make a <27>Demand</>.\nThis is communicated to you via\nthe <21>Destiny Deck</> at the <21>bottom-left</>.", clickNext: true),
+  GuideStep(text: "Ignore the Serpent's Demands at your peril.\nRed Cards are <27>Omens</>, these are difficult challenges.\nBe Prepared!", clickNext: true),
+]
+
+var guideMode = true
+var guideStep = 0
+var guideStepTextStep = 0
 
 # THREE PATHS, HEALER, WARRIOR, ALCHEMIST
 # HEALER -> Healer / Recruiter
@@ -829,7 +942,7 @@ let siteSeer = SiteSettings(name: "Seer Hut", desc: "Explore Destiny", spr: 9, a
   abilityDemolish,
 ])
 
-let siteHouse = SiteSettings(name: "Home", desc: "A place of reproduction", spr: 1, actionsToBuild: 1, abilities: @[
+let siteHome = SiteSettings(name: "Home", desc: "A place of reproduction", spr: 1, actionsToBuild: 1, abilities: @[
   SiteAbility(name: "Reproduce", nFollowers: 2, nActions: 0, startOfTurn: true, action: proc(site: Site) =
     site.units.insert(newUnit(Follower, site), 0)
   ),
@@ -894,6 +1007,7 @@ let siteWatchtower = SiteSettings(name: "Watchtower", desc: "Reduce Rebellion", 
 
 let destinySettings = @[
   DestinyCardSettings(
+    tutorial: true,
     age: 1,
     count: 5,
     demand: "Sacrifice one follower",
@@ -967,7 +1081,7 @@ let destinySettings = @[
       return t.serpentSacrificesMade >= 1
     ,onEndTurn: proc(c: Card, t: Town) =
       if t.serpentSacrificesMade < 1:
-        let site = t.randomSite() do(site: Site) -> bool: site.settings == siteHouse
+        let site = t.randomSite() do(site: Site) -> bool: site.settings == siteHome
         if site != nil:
           echo "found home to disable"
           site.disabled += 1
@@ -986,7 +1100,7 @@ let destinySettings = @[
     ,onEndTurn: proc(c: Card, t: Town) =
       if t.serpentSacrificesMade < 1:
         for site in t.sites:
-          if site.settings == siteHouse:
+          if site.settings == siteHome:
             site.blocked += 1
   ),
   DestinyCardSettings(
@@ -1029,13 +1143,13 @@ let destinySettings = @[
       if t.serpentSacrificesMade < 2:
         var count = 0
         for site in t.sites:
-          if site.settings == siteHouse:
+          if site.settings == siteHome:
             count += 1
         if count > 0:
           let r = rnd(count - 1)
           count = 0
           for site in t.sites:
-            if site.settings == siteHouse:
+            if site.settings == siteHome:
               if r == count:
                 site.settings = siteEmpty
                 break
@@ -1171,13 +1285,13 @@ let destinyOmens = @[
       if t.nRebelsKilled < 3:
         var count = 0
         for site in t.sites:
-          if site.settings == siteHouse:
+          if site.settings == siteHome:
             count += 1
         if count > 0:
           let r = rnd(count)
           count = 0
           for site in t.sites:
-            if site.settings == siteHouse:
+            if site.settings == siteHome:
               if r == count:
                 site.settings = siteRebelBase
                 break
@@ -1207,7 +1321,7 @@ let destinyOmens = @[
 ]
 
 let buildMenu: seq[SiteSettings] = @[
-  siteHouse,
+  siteHome,
   siteAltar,
   siteGuild,
   siteChurch,
@@ -1330,6 +1444,10 @@ proc draw(self: Site, x,y: int) =
     spr(settings.spr, x + 8, y + 1)
 
   # border
+  if hintSite == self and selectedSite != self and frame mod 60 < 30:
+    setColor(8)
+    rrect(x-3, y-3, x + 48 + 3, y + 48 + 3)
+
   setColor(if self.disabled > 0: 27 elif self.blocked > 0: 0 elif self.used or available == false: 15 else: 8)
   if self == selectedSite:
     rrect(x-1, y-1, x + 49, y + 49)
@@ -1725,7 +1843,7 @@ proc fillDestiny() =
   let ageDeck = newPile("", pkHidden)
   block dealCards:
     for ds in destinySettings:
-      if ds.age == age and ds.omen == false:
+      if ds.age == age and ds.omen == false and (guideMode == false or ds.tutorial):
         for i in 0..<ds.count:
           ageDeck.add(newCard(ds))
 
@@ -2022,7 +2140,8 @@ proc gameInit() =
   loadMap(0, "map.json")
   setMap(0)
 
-  age = 1
+  endTurnLocked = true
+  age = 0
   particles = @[]
   towns = @[]
   armies = @[]
@@ -2032,8 +2151,6 @@ proc gameInit() =
   destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
   cardHand = newPile("Hand", pkAllFaceOpen)
   cardHand.pos = vec2i(2,3)
-
-  fillDestiny()
 
   turn = 0
   time = 0.0
@@ -2068,13 +2185,14 @@ proc gameInit() =
             townSerpent.units.add(newUnit(Shaman, townSerpent))
           selectedSite = townserpent
           homeTotem = townSerpent
-          var townHouse = newSite(town, siteHouse, 0, 1)
+          var townHouse = newSite(town, siteHome, 0, 1)
           for i in 0..<2:
             townHouse.units.add(newUnit(Follower, townHouse))
           currentTown = town
           currentTown.isHometown = true
           homeTown = currentTown
           currentTown.actions = 3
+          currentTown.startingActions = currentTown.actions
 
         for i,site in town.sites.mpairs:
           if site == nil:
@@ -2135,6 +2253,10 @@ proc endRelocate() =
   if not hasMovedUnits():
     currentTown.actions += 1
 
+  for site in currentTown.sites:
+    site.units.sort() do(a,b: Unit) -> int:
+      return b.kind.int - a.kind.int
+
 proc grabUnit(unit: Unit) =
   if unit.site.blocked > 0:
     return
@@ -2162,6 +2284,7 @@ proc gameGui() =
   G.hoverColor = 22
   G.activeColor = 21
   G.textColor = 22
+  G.hintColor = 8
   G.downColor = 15
   G.disabledColor = 25
   G.backgroundColor = 1
@@ -2344,7 +2467,7 @@ proc gameGui() =
 
   if turnPhase == phaseTurn:
     if inputMode == SelectSite or inputMode == Relocate:
-      if G.button("<21>E</>nd Turn", 100, 28, placingUnits.len == 0, K_E):
+      if G.button("<21>E</>nd Turn", 100, 28, placingUnits.len == 0 and endTurnLocked == false, K_E):
         tryEndTurn()
       if G.hoverElement == G.element or G.downElement == G.element:
         hoveringOverEndTurn = true
@@ -2362,7 +2485,7 @@ proc gameGui() =
       if inputMode == Relocate:
         if hoveringOverAbility:
           G.buttonBackgroundColor = 27
-        if G.button(if (hoveringOverAbility or hoveringOverEndTurn): "<21>This will end your relocation</>" elif not hasMovedUnits(): "Cancel <21>R</>elocate" else: "Complete <21>R</>elocate", 148, 28, placingUnits.len == 0, K_R):
+        if G.button(if (hoveringOverAbility or hoveringOverEndTurn): "<21>This will end your relocation</>" elif not hasMovedUnits(): "Cancel <21>R</>elocation" else: "End <21>R</>elocation", 148, 28, placingUnits.len == 0, K_R):
           endRelocate()
         G.buttonBackgroundColor = 31
       elif inputMode == SelectSite:
@@ -2377,6 +2500,35 @@ proc gameGui() =
     discard G.button($turnPhase, 148, 28, false)
 
   G.endArea()
+
+  if guideStep < guide.len:
+    G.hintOnly = true
+    let gs = guide[guideStep]
+    G.center = false
+    G.beginArea(screenWidth div 4 + 4, 56, screenWidth div 2 - 8, 50, gTopToBottom, true)
+    G.labelStep(gs.text, guideStepTextStep)
+    if frame mod 3 == 0 or mousebtn(0):
+      guideStepTextStep += 1
+    if guideStepTextStep >= gs.text.len:
+      if gs.clickNext:
+        G.hintHotkey = K_N
+        G.hintOnly = true
+        if G.button("<21>N</>ext", true, K_N):
+          guideStep += 1
+          guideStepTextStep = 0
+          G.hintHotkey = K_UNKNOWN
+    G.endArea()
+
+
+    if gs.check != nil and gs.check():
+      guideStep += 1
+      guideStepTextStep = 0
+      G.hintHotkey = K_UNKNOWN
+  else:
+    G.hintHotkey = K_UNKNOWN
+    G.hintOnly = false
+    hintSite = nil
+    guideMode = false
 
   # town info
   G.beginArea(screenWidth div 4 + 4, 3, screenWidth div 2 - 8, 50, gTopToBottom, true)
@@ -2529,20 +2681,22 @@ proc gameUpdate(dt: float32) =
   if currentTown != nil:
     for i, site in currentTown.sites:
       if site != nil:
-        let cx = screenWidth div 2 - currentTown.width * 25
-        let cy = screenHeight div 2 - currentTown.height * 25
+        if hintSite == nil or hintSite == site:
+          let cx = screenWidth div 2 - currentTown.width * 25
+          let cy = screenHeight div 2 - currentTown.height * 25
 
-        let x = i mod currentTown.width
-        let y = i div currentTown.width
+          let x = i mod currentTown.width
+          let y = i div currentTown.width
 
-        if mx >= cx + x * 50 and my >= cy + y * 50 and mx <= cx + x * 50 + 48 and my <= cy + y * 50 + 48:
-          hoverSite = site
-          if focusFollowsMouse:
-            selectedSite = hoverSite
-        for u in site.units:
-          if mx >= u.pos.x - 1 and mx <= u.pos.x + 7 and my >= u.pos.y - 1 and my <= u.pos.y + 7:
-            hoverUnit = u
-            break
+          if mx >= cx + x * 50 and my >= cy + y * 50 and mx <= cx + x * 50 + 48 and my <= cy + y * 50 + 48:
+            hoverSite = site
+            if focusFollowsMouse:
+              if hintSite == nil or hintSite == hoverSite:
+                selectedSite = hoverSite
+          for u in site.units:
+            if mx >= u.pos.x - 1 and mx <= u.pos.x + 7 and my >= u.pos.y - 1 and my <= u.pos.y + 7:
+              hoverUnit = u
+              break
 
   if hoverUnit != lastHoverUnit or hoverSite != lastHoverSite:
     hoverChangeTime = time
@@ -2569,9 +2723,6 @@ proc gameUpdate(dt: float32) =
         if hoverUnit.kind != Rebel:
           grabUnit(hoverUnit)
       return
-    elif hoverSite != nil:
-      showCircleMenu = not showCircleMenu
-      selectedSite = hoverSite
 
   if inputMode == Relocate or inputMode == PlaceUnit:
     if inputMode == Relocate and placingUnits.len == 0 and doubleClick and hoverUnit == nil:
@@ -2579,7 +2730,8 @@ proc gameUpdate(dt: float32) =
 
     if mousebtnp(0):
       if hoverSite != nil:
-        selectedSite = hoverSite
+        if hintSite == nil or hintSite == hoverSite:
+          selectedSite = hoverSite
       if hoverUnit != nil or placingUnits.len == 0 and inputMode == Relocate:
         pulling = true
       else:
@@ -2709,7 +2861,8 @@ proc gameUpdate(dt: float32) =
         var site = currentTown.sites[ty * currentTown.width + tx]
         if site != nil:
           if inputMode == SelectSite:
-            selectedSite = site
+            if hintSite == nil or hintSite == hoverSite:
+              selectedSite = site
 
 proc gameDraw() =
   frame += 1
@@ -2855,7 +3008,7 @@ proc gameDraw() =
       spr(34 + (frame.int div 10 mod 4), mx - 4, my - 4)
     elif G.downElement != 0:
       spr(40, mx - 1, my - 1)
-    elif G.hoverElement != 0:
+    elif G.activeHoverElement != 0:
       spr(39, mx - 1, my - 1)
     elif inputMode == Relocate or inputMode == PlaceUnit:
       spr(if hoverUnit == nil: 38 else: 41, mx - 4, my - 7)

@@ -94,14 +94,18 @@ proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool 
   var sx = x
   var x = x
   var y = y
+  var wiggle = false
+
+  let t = time()
 
   proc output(c: char, tlen: int) =
     if shadow:
       printShadow($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
     else:
-      print($c, x - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y)
+      print($c, x + (if wiggle: cos(x.float32 * 0.2 + t * 2.0) * 1.5 else: 0) - (if align == taRight: tlen elif align == taCenter: tlen div 2 else: 0), y + (if wiggle: sin(x.float32 + t * 8.0) * 2.0 else: 0))
     x += glyphWidth(c)
 
+  var j = 0
   for text in text.split('\n'):
     let tlen = richPrintLength(text)
 
@@ -114,8 +118,8 @@ proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool 
     #  rect(x,y,x+tlen-1,y+fontHeight()-1)
     #setColor(startColor)
 
+
     var i = 0
-    var j = 0
     while i < text.len:
       if step != -1 and j >= step:
         break
@@ -135,6 +139,9 @@ proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool 
         let code = text[i+1..k-1]
         if code == "/":
           setColor(startColor)
+          wiggle = false
+        elif code == "s":
+          wiggle = true
         elif code.startsWith("spr"):
           var sprId: int
           var (sw,sh) = spriteSize()

@@ -33,6 +33,7 @@ type
     hoverColor*: int
     activeColor*: int
     downColor*: int
+    hintColor*: int
     onColor*: int
     textColor*: int
     disabledColor*: int
@@ -40,6 +41,7 @@ type
     buttonBackgroundColor*: int
     buttonBackgroundColorDisabled*: int
     hoverElement*: int
+    activeHoverElement*: int
     activeElement*: int
     downElement*: int
     wasMouseDown: bool
@@ -53,6 +55,8 @@ type
     vExpand*: bool
     modalArea*: int
     nextAreaId: int
+    hintHotkey*: Keycode
+    hintOnly*: bool
   GuiButton* = tuple
     text: string
     action: proc()
@@ -62,6 +66,7 @@ type
 
 var G*: Gui = new(Gui)
 var lastMouseX,lastMouseY: int
+var frame: int
 
 proc box*(self: Gui, x,y,w,h: int)
 
@@ -109,6 +114,7 @@ proc label*(self: Gui, text: string, x,y,w,h: int, box: bool = false) =
   if e.kind == gMouseMove:
     if pointInRect(e.x, e.y, x, y, w, h):
       hoverElement = element
+      activeHoverElement = 0
 
 proc label*(self: Gui, text: string, w, h: int, box: bool = false) =
   let (x,y) = self.cursor(w,h)
@@ -117,9 +123,48 @@ proc label*(self: Gui, text: string, w, h: int, box: bool = false) =
 
 proc label*(self: Gui, text: string, box: bool = false) =
   assert(area != nil)
-  let w = if hExpand: area.maxX - area.minX else: textWidth(text) + (if box: hPadding * 2 else: 0)
-  let h = if vExpand: area.maxY - area.minY else: fontHeight() * text.countLines() + (if box: vPadding * 2 else: 0)
+  var w = 0
+  var h = 0
+  for line in text.splitLines():
+    var lineW = textWidth(line)
+    if lineW > w:
+      w = lineW
+    h += fontHeight()
+  w = if hExpand: area.maxX - area.minX else: w + (if box: hPadding * 2 else: 0)
+  h = if vExpand: area.maxY - area.minY else: h + (if box: vPadding * 2 else: 0)
   label(text, w, h, box)
+
+proc labelStep*(self: Gui, text: string, x,y,w,h: int, step: int, box: bool = false) =
+  element += 1
+  if e.kind == gRepaint:
+    if box:
+      self.box(x,y,w,h)
+    setColor(textColor)
+    let nLines = text.countLines()
+    richPrint(text, x + (if center: w div 2 else: 0), y + (if center: h div 2 - (fontHeight() * nLines) div 2 else: 0), if center: taCenter else: taLeft, false, step)
+
+  if e.kind == gMouseMove:
+    if pointInRect(e.x, e.y, x, y, w, h):
+      hoverElement = element
+      activeHoverElement = 0
+
+proc labelStep*(self: Gui, text: string, w, h: int, step: int, box: bool = false) =
+  let (x,y) = self.cursor(w,h)
+  labelStep(text, x, y, w, h, step, box)
+  advance(w,h)
+
+proc labelStep*(self: Gui, text: string, step: int, box: bool = false) =
+  assert(area != nil)
+  var w = 0
+  var h = 0
+  for line in text.splitLines():
+    var lineW = textWidth(line)
+    if lineW > w:
+      w = lineW
+    h += fontHeight()
+  w = if hExpand: area.maxX - area.minX else: w + (if box: hPadding * 2 else: 0)
+  h = if vExpand: area.maxY - area.minY else: h + (if box: vPadding * 2 else: 0)
+  labelStep(text, w, h, step, box)
 
 proc drawGuiString(self: Gui, text: string, x,y,w,h: int, enabled: bool) =
   setColor(if enabled: textColor else: disabledColor)
@@ -128,13 +173,18 @@ proc drawGuiString(self: Gui, text: string, x,y,w,h: int, enabled: bool) =
 
 proc button*(self: Gui, x,y,w,h: int, enabled: bool = true, hotkey = K_UNKNOWN, draw: proc(x,y,w,h: int, enabled: bool)): bool =
   element += 1
+  let hintBlocked = (hintOnly and hintHotkey != hotkey)
   if e.kind == gRepaint:
-    setColor(if enabled == false: buttonBackgroundColorDisabled elif downElement == element: downColor else: buttonBackgroundColor)
+    setColor(if enabled == false or hintBlocked: buttonBackgroundColorDisabled elif downElement == element: downColor else: buttonBackgroundColor)
     rrectfill(x,y,x+w,y+h)
+
+    if hotkey != K_UNKNOWN and hotkey == hintHotkey and frame mod 60 < 30:
+      setColor(hintColor)
+      rrect(x-1,y-1,x+w+1,y+h+1)
 
     if enabled and activeElement == element:
       setColor(activeColor)
-    elif enabled and hoverElement == element:
+    elif enabled and not hintBlocked and hoverElement == element:
       setColor(hoverColor)
     else:
       setColor(normalColor)
@@ -155,8 +205,9 @@ proc button*(self: Gui, x,y,w,h: int, enabled: bool = true, hotkey = K_UNKNOWN, 
   if e.kind == gMouseMove:
     if pointInRect(e.x, e.y, x, y, w, h):
       hoverElement = element
+      activeHoverElement = if enabled and not hintBlocked: element else: 0
 
-  if enabled == false:
+  if enabled == false or hintBlocked:
     return false
 
   if e.kind == gMouseDown:
@@ -226,6 +277,7 @@ proc box*(self: Gui, x,y,w,h: int) =
   elif e.kind == gMouseMove:
     if pointInRect(e.x, e.y, x,y,w,h):
       hoverElement = element
+      activeHoverElement = 0
 
 proc sprite*(self: Gui, spr: int, x,y,w,h: int) =
   element += 1
@@ -327,6 +379,7 @@ proc beginVertical*(self: Gui, width: int, box: bool = false) =
   beginArea(area.cursorX, area.cursorY, width, area.maxY - area.cursorY, gTopToBottom, box)
 
 proc draw*(self: Gui, onGui: proc()) =
+  frame += 1
   element = 0
   e.kind = gRepaint
   onGui()
@@ -342,6 +395,7 @@ proc update*(self: Gui, onGui: proc(), dt: float32) =
   var lastCount = 0
   if mx != lastMouseX or my != lastMouseY:
     hoverElement = 0
+    activeHoverElement = 0
     e.kind = gMouseMove
     e.x = mx
     e.y = my
