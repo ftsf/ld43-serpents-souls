@@ -10,6 +10,11 @@ import cards
 import gui
 import times
 import algorithm
+import streams
+import os
+import pathfinding
+import hashes
+import tables
 
 import strutils
 
@@ -188,6 +193,7 @@ type
     Soldier
     Neutral
     Sick
+    Cavalry
 
   Unit = ref object of RootObj
     kind: UnitKind
@@ -196,11 +202,16 @@ type
     team: int
     age: int
     pos: Vec2f
+    moveDist: int
+    battlePos: Vec2i
+    battleMoved: bool
+    battleAttacked: bool
     flash: int
     hp: int
     usedAbility: bool
     souls: int
     abilities: seq[ShamanAbility]
+    hidden: bool
 
   SiteAbility = object
     name: string
@@ -248,6 +259,7 @@ type
     units: seq[Unit]
     disabled: int
     blocked: int
+    damage: int
 
   Town = ref object of RootObj
     pos: Vec2i
@@ -265,6 +277,22 @@ type
     serpentSacrificesMade: int
     nRebelsKilled: int
     nHealed: int
+
+  BattleMove = object
+    unit: Unit
+    path: seq[Vec2i]
+    index: int
+    time: float32
+
+  Battle = ref object of RootObj
+    pos: Vec2i
+    age: int
+    width: int
+    height: int
+    map: seq[int]
+    units: seq[Unit]
+    moves: seq[BattleMove]
+    pauseTimer: float32
 
   Army = ref object of RootObj
     pos: Vec2i
@@ -309,6 +337,63 @@ type InputKind = enum
   ChooseAbilityToLearn
 
 # PREPROCS
+
+proc hash*(x: Vec2i): Hash =
+  var h: Hash = 0
+  h = h !& x.x
+  h = h !& x.y
+  result = !$h
+
+iterator neighbors*(self: Battle, start: Vec2i, node: Vec2i): Vec2i =
+  for x in -1..1:
+    for y in -1..1:
+      if x == 0 or y == 0:
+        let offset = vec2i(x,y)
+        let n = node + offset
+        if n.x >= 0 and n.x < width and n.y >= 0 and n.y < height:
+          let t = map[n.y * width + n.x]
+          if t != 0 and t != 4:
+            var occupied = false
+            if node != start:
+              for u in units:
+                if u.battlePos == n:
+                  occupied = true
+                  break
+            if not occupied:
+              yield n
+
+proc heuristic*(self: Battle, a,b: Vec2i): int =
+  return abs(a.x - b.x) + abs(a.y - b.y)
+
+iterator items*(self: Battle): Vec2i =
+  for y in 0..<height:
+    for x in 0..<width:
+      yield vec2i(x,y)
+
+proc cost*(self: Battle, a,b: Vec2i, mover: Unit = nil): int =
+  let t = map[b.y * width + b.x]
+  for u in units:
+    if u.team != mover.team and u.battlePos == b:
+      return 999
+  if mover != nil and mover.kind == Cavalry:
+    result = case t:
+      of 0,1: 4 # dirt
+      of 2: 999 # rock
+      of 3: 20 # forest
+      of 4: 999 # water
+      of 5: 1 # road
+      of 9: 4
+      else: 999
+  else:
+    result = case t:
+      of 0,1: 4 # dirt
+      of 2: 19 # rock
+      of 3: 9 # forest
+      of 4: 999 # water
+      of 5: 1 # road
+      of 9: 4
+      else: 999
+
 proc move*(self: Unit, to: Site) =
   if site != nil:
     site.units.delete(site.units.find(self))
@@ -363,6 +448,7 @@ proc dialogYesNo(text: string, onYes: proc() = nil, onNo: proc() = nil)
 proc expand(self: Town)
 proc newSite(town: Town, siteSettings: SiteSettings, x, y: int): Site {.discardable.}
 proc newParticle*(pos: Vec2f, vel: Vec2f, ttl: float32, sheet: int, startSpr: int, endSpr: int)
+proc newParticleDest*(pos: Vec2f, dest: Vec2f, ttl: float32, sheet: int, startSpr: int, endSpr: int)
 proc newParticleText*(pos: Vec2f, vel: Vec2f, ttl: float32, text: string, color1,color2: int)
 proc newUnit(kind: UnitKind, site: Site): Unit
 
@@ -371,6 +457,7 @@ proc removeFollower(self: Site): bool =
     if u.kind == Follower:
       units.delete(i)
       newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
+      newParticleDest(u.pos, vec2f(screenWidth div 4 + 40, 50), 0.25, 0, 16, 19)
       return true
 
 proc killFollower(self: Site): bool =
@@ -379,6 +466,7 @@ proc killFollower(self: Site): bool =
       u.site.town.rebellion += 1
       units.delete(i)
       newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
+      newParticleDest(u.pos, vec2f(screenWidth div 4 + 40, 50), 0.25, 0, 16, 19)
       rebellionFlash = 5
       return true
 
@@ -479,6 +567,10 @@ var actionFlash: int
 var rebellionFlash: int
 var turnPhase: TurnPhase
 var phaseTimer: float32
+var saveExists: bool
+var battlesWaging: bool
+
+var pan: Vec2i
 
 var particles: seq[Particle]
 var time: float32
@@ -489,11 +581,14 @@ var hintSite: Site
 var homeTown: Town
 var homeTotem: Site
 var currentTown: Town
+var currentBattle: Battle
+var battles: seq[Battle]
 var currentArmy: Army
 var placingUnits: seq[Unit]
 var placingUnitSource: Site
 var inputMode: InputKind
 var selectedUnit: Unit
+var selectedUnitMoves: Table[Vec2i,(int, (bool, Vec2i))]
 var hoverUnit: Unit
 var lastClickPos: Vec2i
 var lastClickTime: float32
@@ -512,9 +607,10 @@ var cardHand: Pile
 var currentDestiny: Card
 var showCircleMenu: bool
 var age = 1
-var endTurnLocked = false
 
-var mainMenu: bool
+var mainMenu: bool = true
+var optionsMenu: bool = false
+var gameStarted = false
 
 var areYouSure: bool
 var areYouSureMessage: string
@@ -522,6 +618,8 @@ var areYouSureYes: proc()
 var areYouSureNo: proc()
 
 var onSelectUnit: proc(unit: Unit) = nil
+var selectUnitMinRadius: int
+var selectUnitMaxRadius: int
 
 var undoStack: seq[Town]
 
@@ -558,7 +656,7 @@ let guide = @[
     G.hintHotkey = K_R
     return inputMode == SelectSite
   ),
-  GuideStep(text: "Select the <21>Empty Site</> with 3 Followers and choose\n<21>Build Site</> and select <21>Home</>. This also costs 1 Action <spr(8)>", check: proc(): bool =
+  GuideStep(text: "With the <21>Empty Site</> with 3 Followers selected,\nchoose <21>Build Site</> and select <21>Home</>. This also costs 1 Action <spr(8)>", check: proc(): bool =
     var count = 0
     if selectedSite != nil and selectedSite.settings == siteEmpty and selectedSite.units.len >= 3:
       G.hintHotkey = K_1
@@ -594,7 +692,7 @@ let guide = @[
   GuideStep(text: "The Serpent is now Satisfied for this Turn.\nHowever, Killing a Follower increases <27>Rebellion</> (<spr(10)>).", clickNext: true),
   GuideStep(text: "When <27>Rebellion</> (<spr(10)>) reaches <27>5</>, A <27>Rebel</> (<spr(3)>) will appear.\nRebels will kill Followers at the End of the Turn.", clickNext: true),
   GuideStep(text: "<27>Rebels</> (<spr(3)>) can be killed by <10>Soldiers</> (<spr(4)>).\nYou will need to build a <21>Barracks</> to Train them.", clickNext: true),
-  GuideStep(text: "<21>Home</>s require 2 Followers to <21>Reproduce</> at the start of each turn.\n<21>Relocate</> excess Followers to the <21>Serpent Totem</>,\nwe have other uses for them.", check: proc(): bool =
+  GuideStep(text: "<21>Home</>s require 2 Followers to <21>Reproduce</> at the <21>Start Of Turn</>.\n<21>Relocate</> excess Followers to the <21>Serpent Totem</>,\nwe have other uses for them.", check: proc(): bool =
     hintSite = nil
     if inputMode == SelectSite:
       G.hintHotkey = K_R
@@ -621,9 +719,8 @@ let guide = @[
           return true
   ),
   GuideStep(text: "This uses your Shaman's Action (<spr(24)>) and gave them a Soul (<spr(7)>).", clickNext: true),
-  GuideStep(text: "Souls (<spr(7)>) can be used to learn new <21>Shaman Skills</>.\nBut you'll need to wait until <21>Next Turn</> to do that.", clickNext: true),
+  GuideStep(text: "Souls (<spr(7)>) can be used to learn new <21>Shaman Skills</>.\n", clickNext: true),
   GuideStep(text: "You're out of Actions now, so <21>End the Turn</>.", check: proc(): bool =
-    endTurnLocked = false
     G.hintHotkey = K_E
     if turn == 2:
       return true
@@ -632,7 +729,7 @@ let guide = @[
   GuideStep(text: "Ignore the Serpent's Demands at your peril.\nRed Cards are <27>Omens</>, these are difficult challenges.\nBe Prepared!", clickNext: true),
 ]
 
-var guideMode = true
+var guideMode = false
 var guideStep = 0
 var guideStepTextStep = 0
 
@@ -681,7 +778,7 @@ let shamanAbilities = @[
           break
   ),
   # warrior
-  ShamanAbility(name: "Stab", desc: "Kill 1 Rebel on Site", nActions: 1, nRebels: 1, nSoulsToUnlock: 2, nSouls: 1, action: proc(unit: Unit, site: Site) =
+  ShamanAbility(name: "Stab", desc: "Kill 1 Rebel on Site", nActions: 1, nRebels: 1, nSoulsToUnlock: 2, action: proc(unit: Unit, site: Site) =
     for u in site.units:
       if u.kind == Rebel:
         u.hp = 0
@@ -788,17 +885,20 @@ let siteSerpent = SiteSettings(name: "Serpent Totem", spr: 0, abilities: @[
       homeTown.serpentSouls += 1
       homeTown.serpentSacrificesMade += 1
   ),
-  SiteAbility(name: "Sacrifice to Serpent", desc: "Kill a Shaman, all their souls\nwill flow into the Serpent", nFollowers: 1, nShamans: 1, multiUse: true, nActions: 0, action: proc(site: Site) =
-    # kill 1 shaman, capture their souls
-    # TODO: select shaman
-    for u in site.units:
-      if u.kind == Shaman:
+  SiteAbility(name: "Sacrifice Shaman", desc: "Kill a Shaman, all their souls\nwill flow into the Serpent", nFollowers: 1, nShamans: 1, multiUse: true, nActions: 0, action: proc(site: Site) =
+    inputMode = SelectUnit
+    selectUnitMinRadius = 0
+    selectUnitMaxRadius = 0
+    onSelectUnit = proc(unit: Unit) =
+      if unit.kind == Shaman and unit.site == site:
+        unit.hp = 0
         homeTown.serpentSouls += 1
-        homeTown.serpentSouls += u.souls
-        site.town.rebellion += 1
-        rebellionFlash = 5
+        homeTown.serpentSouls += unit.souls
         homeTown.serpentSacrificesMade += 1
-        u.hp = 0
+        rebellionFlash = 5
+        site.town.rebellion += 1
+        inputMode = SelectSite
+        onSelectUnit = nil
   ),
   SiteAbility(name: "Expand Village", desc: "Expands the village from\n3x3 to 5x3 and 5x3 to 5x4", nFollowers: 10, nActions: 3, action: proc(site: Site) =
     site.town.expand()
@@ -910,6 +1010,16 @@ let siteGuild = SiteSettings(name: "Shaman Hut", desc: "Train powerful Shaman", 
         u.flash = 5
         break
   ),
+  SiteAbility(name: "Clear Skills", desc: "Clear One Shaman's Skills", nShamans: 1, nActions: 1, action: proc(site: Site) =
+    inputMode = SelectUnit
+    selectUnitMinRadius = 0
+    selectUnitMaxRadius = 0
+    onSelectUnit = proc(unit: Unit) =
+      if unit.kind == Shaman and unit.site == site:
+        unit.abilities = @[]
+        inputMode = SelectSite
+        onSelectUnit = nil
+  ),
   abilityDemolish,
 ])
 
@@ -949,7 +1059,7 @@ let siteHome = SiteSettings(name: "Home", desc: "A place of reproduction", spr: 
   abilityDemolish,
 ])
 
-let siteObstacle = SiteSettings(name: "Hovel", desc: "A filty obstacle", spr: 7, actionsToBuild: 0, abilities: @[
+let siteHovel = SiteSettings(name: "Hovel", desc: "A filty obstacle", spr: 7, actionsToBuild: 0, abilities: @[
   SiteAbility(name: "Sow Rebellion", desc: "creates rebels", startOfTurn: true, action: proc(site: Site) =
     if site.town.team != 0:
       site.town.rebellion += 1
@@ -995,11 +1105,14 @@ let siteWatchtower = SiteSettings(name: "Watchtower", desc: "Reduce Rebellion", 
   ),
   SiteAbility(name: "Snipe Rebel", desc: "Remove one Rebel", nSoldiers: 1, nActions: 1, action: proc(site: Site) =
     inputMode = SelectUnit
+    selectUnitMinRadius = 1
+    selectUnitMaxRadius = 1
     onSelectUnit = proc(unit: Unit) =
       if unit.kind == Rebel:
-        unit.hp = 0
-        inputMode = SelectSite
-        onSelectUnit = nil
+        if abs(unit.site.pos.x - site.pos.x) <= 1 and abs(unit.site.pos.y - site.pos.y) <= 1:
+          unit.hp = 0
+          inputMode = SelectSite
+          onSelectUnit = nil
 
   ),
   abilityDemolish,
@@ -1262,10 +1375,11 @@ let destinyOmens = @[
     checkDemand: proc(c: Card, t: Town): bool =
       return t.serpentSacrificesMade >= 3
     ,onEndTurn: proc(c: Card, t: Town) =
-      for i in 0..<3:
-        let u = t.randomUnit() do(x: Unit) -> bool: x.kind == Follower
-        if u != nil:
-          u.setKind(Sick)
+      if t.serpentSacrificesMade < 3:
+        for i in 0..<3:
+          let u = t.randomUnit() do(x: Unit) -> bool: x.kind == Follower
+          if u != nil:
+            u.setKind(Sick)
   ),
   DestinyCardSettings(
     age: 2,
@@ -1320,6 +1434,24 @@ let destinyOmens = @[
 
 ]
 
+let siteSettings: seq[SiteSettings] = @[
+  siteHome,
+  siteAltar,
+  siteGuild,
+  siteChurch,
+  siteBarracks,
+  siteWatchtower,
+  siteHealer,
+  siteSeer,
+  siteSerpent,
+  siteSerpent2,
+  siteSerpent3,
+  siteSquare,
+  siteHovel,
+  siteRebelBase,
+  siteEmpty,
+]
+
 let buildMenu: seq[SiteSettings] = @[
   siteHome,
   siteAltar,
@@ -1344,6 +1476,10 @@ proc newUnit(kind: UnitKind, site: Site): Unit =
   result.hp = 1
   result.age = 0
   result.usedAbility = false
+  result.moveDist = case kind:
+    of Cavalry: 40
+    of Shaman: 15
+    else: 20
 
 proc dialogYesNo(text: string, onYes: proc() = nil, onNo: proc() = nil) =
   areYouSure = true
@@ -1353,6 +1489,9 @@ proc dialogYesNo(text: string, onYes: proc() = nil, onNo: proc() = nil) =
 
 proc newParticle*(pos: Vec2f, vel: Vec2f, ttl: float32, sheet: int, startSpr: int, endSpr: int) =
   particles.add(Particle(pos: pos, vel: vel, ttl: ttl, maxTtl: ttl, sheet: sheet, startSpr: startSpr, endSpr: endSpr))
+
+proc newParticleDest*(pos: Vec2f, dest: Vec2f, ttl: float32, sheet: int, startSpr: int, endSpr: int) =
+  particles.add(Particle(pos: pos, hasDest: true, dest: dest, ttl: ttl, maxTtl: ttl, sheet: sheet, startSpr: startSpr, endSpr: endSpr))
 
 proc newParticleText*(pos: Vec2f, vel: Vec2f, ttl: float32, text: string, color1,color2: int) =
   particles.add(Particle(pos: pos, vel: vel, ttl: ttl, maxTtl: ttl, text: text, color1: color1, color2: color2))
@@ -1384,20 +1523,29 @@ proc draw(self: Unit, x,y: int) =
   let x = pos.x
   let y = pos.y
 
+  if currentBattle != nil and hidden:
+    if team == 1:
+      ditherPatternCheckerboard()
+    else:
+      return
+
   if kind == Follower:
     spr(1, x, y)
   elif kind == Shaman:
-    spr(2, x, y)
+    spr(14, x - 4, y - 4, 2, 2)
   elif kind == Rebel:
     spr(3, x, y)
   elif kind == Soldier:
-    spr(4, x, y)
+    spr(if team == 2: 20 else: 4, x, y)
+  elif kind == Cavalry:
+    spr(if team == 2: 22 else: 23, x, y)
   elif kind == Neutral:
     spr(5, x, y)
   elif kind == Sick:
     spr(6, x, y)
 
   pal()
+  ditherPattern()
 
   if kind == Shaman:
     for i in 0..<souls:
@@ -1429,6 +1577,98 @@ proc check(self: SiteAbility, site: Site): bool =
     return false
   return true
 
+proc `<`*(a,b: (Vec2i,int)): bool =
+  return a[1] < b[1]
+
+proc isTrap(self: Battle, unit: Unit, pos: Vec2i, reality = true): bool =
+  var count = 0
+  for u in units:
+    if u.battleAttacked == false and u.team != unit.team and manhattanDist(pos, u.battlePos) == 1:
+      if reality or u.hidden == false:
+        count += 1
+        if count == 2:
+          return true
+  return false
+
+proc drawBattle(self: Battle) =
+  let cx = screenWidth div 2 - width * 8
+  let cy = screenHeight div 2 - height * 8
+
+  setSpritesheet(3)
+  for y in 0..<height:
+    for x in 0..<width:
+      spr(map[y * width + x], cx + x * 16, cy + y * 16)
+
+  setSpritesheet(0)
+  for u in units:
+    u.draw(cx + u.battlePos.x * 16 + 8 - 4, cy + u.battlePos.y * 16 + 8 - 4)
+    if u.team == 1 and turnPhase == phaseTurn:
+      if not u.battleMoved:
+        setColor(8)
+        circfill(u.pos.x + 1, u.pos.y + 8, 1)
+      if not u.battleAttacked:
+        setColor(27)
+        circfill(u.pos.x + 7, u.pos.y + 8, 1)
+
+  if hoverUnit != nil and hoverUnit.team != 1:
+    let moves = calculatePossibleMoveAttacks(hoverUnit, false)
+    # show their next move
+    setColor(27)
+    if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
+    for move in moves:
+      let x = move[0].x
+      let y = move[0].y
+      if move[1]:
+        circ(cx + x * 16 + 8, cy + y * 16 + 8, 3)
+      else:
+        rrect(cx + x * 16 + 2, cy + y * 16 + 2, cx + x * 16 + 13, cy + y * 16 + 13)
+    ditherPattern()
+
+  var (mx,my) = mouse()
+  mx -= cx
+  my -= cy
+  let mtx = mx div 16
+  let mty = my div 16
+  let mpos = vec2i(mtx,mty)
+
+  if selectedUnit != nil:
+    if not selectedUnit.battleMoved:
+      for y in 0..<height:
+        for x in 0..<width:
+          let pos = vec2i(x,y)
+          if pos == selectedUnit.battlePos:
+            continue
+          let distprev = selectedUnitMoves[pos]
+          let dist = distprev[0]
+          let prev = distprev[1][1]
+          if dist <= selectedUnit.moveDist:
+            if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
+            setColor(if isTrap(selectedUnit, pos, false): 27 else: 21)
+            rrect(cx + x * 16, cy + y * 16, cx + x * 16 + 15, cy + y * 16 + 15)
+            ditherPattern()
+
+      if selectedUnitMoves.hasKey(mpos):
+        # draw path to tile under mouse
+        var distprev = selectedUnitMoves[mpos]
+        var pos = mpos
+        while distprev[1][0]:
+          let prev = distprev[1][1]
+          line(cx + prev.x * 16 + 8, cy + prev.y * 16 + 8, cx + pos.x * 16 + 8, cy + pos.y * 16 + 8)
+          distprev = selectedUnitMoves[prev]
+          pos = prev
+
+    if not selectedUnit.battleAttacked:
+      setColor(27)
+      for u in units:
+        if u.team != selectedUnit.team:
+          if manhattanDist(u.battlePos, selectedUnit.battlePos) == 1:
+            if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
+            let x = u.battlePos.x
+            let y = u.battlePos.y
+            rrect(cx + x * 16, cy + y * 16, cx + x * 16 + 15, cy + y * 16 + 15)
+            ditherPattern()
+
+
 proc draw(self: Site, x,y: int) =
 
   var available = false
@@ -1443,12 +1683,13 @@ proc draw(self: Site, x,y: int) =
     setSpritesheet(1)
     spr(settings.spr, x + 8, y + 1)
 
+
   # border
   if hintSite == self and selectedSite != self and frame mod 60 < 30:
     setColor(8)
     rrect(x-3, y-3, x + 48 + 3, y + 48 + 3)
 
-  setColor(if self.disabled > 0: 27 elif self.blocked > 0: 0 elif self.used or available == false: 15 else: 8)
+  setColor(if self.disabled > 0: 27 elif self.blocked > 0: 0 elif self.used or available == false: 15 elif (inputMode != SelectUnit): 8 else: 15)
   if self == selectedSite:
     rrect(x-1, y-1, x + 49, y + 49)
     rect(x, y, x + 48, y + 48)
@@ -1459,6 +1700,14 @@ proc draw(self: Site, x,y: int) =
     pset(x+2, y+48-2)
   else:
     rrect(x, y, x + 48, y + 48)
+
+  if inputMode == SelectUnit:
+    let dx = abs(pos.x - selectedSite.pos.x)
+    let dy = abs(pos.y - selectedSite.pos.y)
+    let dd = max(dx,dy)
+    if dd <= selectUnitMaxRadius and dd >= selectUnitMinRadius:
+      setColor(21)
+      rrect(x, y, x + 48, y + 48)
 
   setColor(7)
 
@@ -1490,15 +1739,15 @@ proc draw(self: Site, x,y: int) =
 proc check(self: ShamanAbility, unit: Unit): bool =
   if unit.usedAbility and multiUse == false:
     return false
-  if nActions > unit.site.town.actions:
+  if unit.site == nil or nActions > unit.site.town.actions:
     return false
   if nSouls > unit.souls:
     return false
-  if nFollowers > unit.site.getFollowerCount:
+  if unit.site == nil or nFollowers > unit.site.getFollowerCount:
     return false
-  if nRebels > unit.site.getRebelCount:
+  if unit.site == nil or nRebels > unit.site.getRebelCount:
     return false
-  if nSick > unit.site.getSickCount:
+  if unit.site == nil or nSick > unit.site.getSickCount:
     return false
   return true
 
@@ -1638,6 +1887,9 @@ proc draw(self: ShamanAbility, sx, sy, w, h: int, enabled: bool, unit: Unit, ind
 
   let site = unit.site
 
+  if site == nil:
+    return
+
   let followerCount = site.getFollowerCount
   let shamanCount = site.getShamanCount
   let rebelCount = site.getRebelCount
@@ -1661,6 +1913,8 @@ proc draw(self: ShamanAbility, sx, sy, w, h: int, enabled: bool, unit: Unit, ind
 
   j = 0
   for i in 0..<nSouls:
+    if i >= unit.souls:
+      pal(1,27)
     spr(7, x, y)
     x += 7
     j += 1
@@ -1735,7 +1989,7 @@ proc draw(self: ShamanAbility, sx, sy, w, h: int, enabled: bool, unit: Unit, ind
     y += 10
 
 method draw(self: DestinyCardSettings, c: Card, pos: Vec2f) =
-  let passed = currentDestiny == c and checkDemand(c, currentTown)
+  let passed = currentDestiny == c and checkDemand(c, homeTown)
 
   G.center = false
 
@@ -1753,18 +2007,27 @@ method draw(self: DestinyCardSettings, c: Card, pos: Vec2f) =
   #  x += 16
 
   if event != "":
-    G.textColor = teamColors[1]
+    G.textColor = 21
+    setFont(1)
     G.label(event)
+    setFont(0)
     G.textColor = 22
 
   if demand != "":
+    setFont(1)
+    G.textColor = if passed: 18 else: 27
+    G.label("Demand")
+    G.textColor = 22
+    setFont(0)
     if passed:
-      G.label("Demand: <18>" & demand)
+      G.textColor = 18
+      G.label(demand)
+      G.textColor = 22
     else:
       if currentDestiny == c and hoveringOverEndTurn and frame mod flashMod < flashCmp:
-        G.label("Demand: <21>" & demand)
+        G.label("<21>" & demand)
       else:
-        G.label("Demand: <27>" & demand)
+        G.label("<27>" & demand)
   if gain != "":
     if passed:
       G.label("And: <21>" & gain)
@@ -1810,6 +2073,7 @@ proc draw(self: Town) =
     for x in 0..<width:
       let site = sites[width * y + x]
       if site != nil:
+        site.pos = vec2i(x,y)
         site.screenPos = vec2i(cx + x * 52, cy + y * 52)
         site.draw(cx + x * 52, cy + y * 52)
 
@@ -1847,21 +2111,23 @@ proc fillDestiny() =
         for i in 0..<ds.count:
           ageDeck.add(newCard(ds))
 
-  ageDeck.shuffle()
-  ageDeck.shuffle()
-  ageDeck.shuffle()
+  if ageDeck.len > 0:
+    ageDeck.shuffle()
+    ageDeck.shuffle()
+    ageDeck.shuffle()
 
-  for i in 0..<ageCardCount[age-1]:
-    destinyPile.add(ageDeck.drawCard())
+    for i in 0..<ageCardCount[age-1]:
+      destinyPile.add(ageDeck.drawCard())
 
   for c in destinyDiscardPile:
     destinyPile.add(c)
 
   destinyDiscardPile.clear()
 
-  destinyPile.shuffle()
-  destinyPile.shuffle()
-  destinyPile.shuffle()
+  if destinyPile.len > 0:
+    destinyPile.shuffle()
+    destinyPile.shuffle()
+    destinyPile.shuffle()
 
   var omens = newSeq[DestinyCardSettings]()
   for ds in destinyOmens:
@@ -1910,6 +2176,11 @@ proc startTurn() =
         if ab.startOfTurn:
           if ab.check(site):
             ab.action(site)
+
+  for battle in battles:
+    for u in battle.units:
+      u.battleMoved = false
+      u.battleAttacked = false
 
   if currentDestiny != nil:
     # apply old destiny and discard
@@ -1982,7 +2253,15 @@ proc startTurn() =
 
 
 proc endTurn() =
+
+  if inputMode == Relocate:
+    endRelocate()
+
   turnPhase = phaseEndOfTurn
+
+  battlesWaging = true
+  selectedUnit = nil
+  selectedSite = nil
 
   undoStack = @[]
 
@@ -2029,12 +2308,12 @@ proc endTurn() =
 
   if homeTown.serpentSouls >= 100:
     dialogYesNo("THE SERPENT GOD HAS BEEN SUMMONED!") do:
-      gameInit()
+      mainMenu = true
     return
 
   if homeTotem.settings != siteSerpent and homeTotem.settings != siteSerpent2 and homeTotem.settings != siteSerpent3:
     dialogYesNo("Your cult has been destroyed") do:
-      gameInit()
+      mainMenu = true
     return
 
   # mark all sites as unused
@@ -2119,6 +2398,37 @@ proc newTown(name: string, size: int, pos: Vec2i): Town =
   town.sites = newSeq[Site](town.width * town.height)
   return town
 
+proc newBattle(x,y: int): Battle =
+  result = new(Battle)
+  result.pos = vec2i(x,y)
+  result.age = 0
+  result.width = 8
+  result.height = 8
+  result.map = newSeq[int](result.width * result.height)
+  for y in 0..<result.height:
+    for x in 0..<result.width:
+        result.map[y * result.width + x] = rnd([1,3,1,1,3,1,1,1,3,3,2,1,3,1,5,1,3,2])
+  result.map[(result.height div 2 - rnd(1)) * result.width + (result.width div 2 - rnd(1))] = 9
+
+  # place 1 water tile around the middle
+  let wx = rnd(result.width-1)
+  let wy = result.height div 2 - rnd(1)
+  result.map[wy * result.width + wx] = 4
+
+  result.units = @[]
+
+  for i in 0..<result.width:
+    var u = newUnit(if i == result.width div 2: Shaman else: Soldier, nil)
+    u.battlePos = vec2i(i,result.height-1)
+    u.team = 1
+    result.units.add(u)
+
+  for i in 0..<result.width:
+    var u = newUnit(rnd([Soldier,Soldier,Soldier,Cavalry]), nil)
+    u.battlePos = vec2i(i,0)
+    u.team = 2
+    result.units.add(u)
+
 proc newSite(town: Town, siteSettings: SiteSettings, x, y: int): Site {.discardable.} =
   var site = new(Site)
   site.settings = siteSettings
@@ -2126,21 +2436,31 @@ proc newSite(town: Town, siteSettings: SiteSettings, x, y: int): Site {.discarda
   site.used = false
   site.units = @[]
   town.sites[town.width * y + x] = site
+  site.pos = vec2i(x,y)
   return site
 
 proc gameInit() =
-  srand()
-
   loadSpritesheet(0, "spritesheet.png", 8, 8)
   loadSpritesheet(1, "tileset.png", 32, 32)
   loadSpritesheet(2, "tilesetWorld.png", 8, 8)
-
-  turnPhase = phaseTurn
-
+  loadSpritesheet(3, "tilesetBattle.png", 16,16)
   loadMap(0, "map.json")
   setMap(0)
 
-  endTurnLocked = true
+proc newGame() =
+  srand()
+
+  currentDestiny = nil
+
+  turnPhase = phaseTurn
+
+
+  battles = @[]
+
+  currentBattle = newBattle(2,2)
+
+  battles.add(currentBattle)
+
   age = 0
   particles = @[]
   towns = @[]
@@ -2199,11 +2519,215 @@ proc gameInit() =
             if town == currentTown:
               site = newSite(town, siteEmpty, i mod town.width, i div town.width)
             else:
-              site = newSite(town, siteObstacle, i mod town.width, i div town.width)
+              site = newSite(town, siteHovel, i mod town.width, i div town.width)
 
         towns.add(town)
 
   startTurn()
+
+proc save(self: Unit, f: FileStream) =
+  f.write(kind.uint8)
+  f.write(hp.uint8)
+  f.write(team.uint8)
+  f.write(age.uint8)
+  f.write(souls.uint8)
+  f.write(abilities.len.uint8)
+  for a in abilities:
+    for i,ai in shamanAbilities:
+      if ai == a:
+        f.write(i.uint8)
+
+proc loadUnit(f: FileStream): Unit =
+  result = new(Unit)
+  result.kind = f.readUint8().UnitKind
+  result.hp = f.readUint8().int
+  result.team = f.readUint8().int
+  result.age = f.readUint8().int
+  result.souls = f.readUint8().int
+  let nAbilities = f.readUint8().int
+  for i in 0..<nAbilities:
+    let abilityId = f.readUint8().int
+    result.abilities.add(shamanAbilities[abilityId])
+
+proc save(self: Site, f: FileStream) =
+  f.write(settings.name.len.uint8)
+  f.write(settings.name)
+  f.write(used.uint8)
+  f.write(blocked.uint8)
+  f.write(disabled.uint8)
+  f.write(units.len.uint8)
+  for unit in units:
+    unit.save(f)
+
+proc loadSite(f: FileStream): Site =
+  result = new(Site)
+  result.units = @[]
+  var nameLen = f.readUint8()
+  var name = f.readStr(nameLen.int)
+  for s in siteSettings:
+    if s.name == name:
+      result.settings = s
+      break
+  if result.settings == nil:
+    echo "error finding settings: ", name
+  result.used = f.readUint8().bool
+  result.blocked = f.readUint8().int
+  result.disabled = f.readUint8().int
+  var nUnits = f.readUint8().int
+  for i in 0..<nUnits:
+    var unit = f.loadUnit()
+    unit.site = result
+    result.units.add(unit)
+
+proc save(self: Town, f: FileStream) =
+  f.write(name.len.uint8)
+  f.write(name)
+  f.write(size.uint8)
+  f.write(pos.x.uint8)
+  f.write(pos.y.uint8)
+  f.write(team.uint8)
+  f.write(width.uint8)
+  f.write(height.uint8)
+  f.write(actions.uint8)
+  f.write(rebellion.uint8)
+  f.write(isHometown.uint8)
+  f.write(sites.len.uint8)
+  for site in sites:
+    site.save(f)
+
+proc save(self: Card, f: FileStream) =
+  # look up index of card in destinySettings
+  let ds = settings.DestinyCardSettings
+  for i,s in destinySettings:
+    if s == ds:
+      f.write(i.uint16)
+      break
+  for i,s in destinyOmens:
+    if s == ds:
+      f.write((1000 + i).uint16)
+      break
+
+proc loadCard(f: FileStream): Card =
+  # look up index of card in destinySettings
+  result = new(Card)
+  let cardIndex = f.readUint16().int
+  if cardIndex < 1000:
+    result.settings = destinySettings[cardIndex]
+  else:
+    result.settings = destinyOmens[cardIndex-1000]
+
+proc loadTown(f: FileStream): Town =
+  result = new(Town)
+  result.sites = @[]
+  var nameLen = f.readUint8().int
+  result.name = f.readStr(nameLen)
+  result.size = f.readUint8().int
+  result.pos.x = f.readUint8().int
+  result.pos.y = f.readUint8().int
+  result.team = f.readUint8().int
+  result.width = f.readUint8().int
+  result.height = f.readUint8().int
+  result.actions = f.readUint8().int
+  result.rebellion = f.readUint8().int
+  result.isHometown = f.readUint8().bool
+  var nSites = f.readUint8().int
+  for i in 0..<nSites:
+    var site = f.loadSite()
+    site.town = result
+    result.sites.add(site)
+
+proc saveGame() =
+  let saveFile = joinPath(writePath,"save")
+  let saveFileTmp = joinPath(writePath,"save.tmp")
+  let saveFileOld = joinPath(writePath,"save.old")
+
+  var f = openFileStream(saveFileTmp, fmWrite)
+  f.write("SerpentsSave")
+  # globals
+  f.write(age.uint8)
+  f.write(turn.uint16)
+  f.write(guideMode.uint8)
+  f.write(guideStep.uint8)
+  # save the state of the destinyPile
+  f.write(destinyPile.len.uint16)
+  for c in destinyPile:
+    c.save(f)
+  # save the discardPile
+  f.write(destinyDiscardPile.len.uint16)
+  for c in destinyDiscardPile:
+    c.save(f)
+  # save currentDestiny
+  currentDestiny.save(f)
+  # go through each town and save it
+  f.write(towns.len.uint8)
+  for town in towns:
+    town.save(f)
+  f.close()
+
+  if fileExists(saveFileOld):
+    removeFile(saveFileOld)
+  if fileExists(saveFile):
+    moveFile(saveFile,saveFileOld)
+  moveFile(saveFileTmp, saveFile)
+  removeFile(saveFileOld)
+  echo "saved game"
+
+proc loadGame(): bool =
+  var f: FileStream
+  try:
+    f = openFileStream(joinPath(writePath,"save"), fmRead)
+  except IOError:
+    return false
+
+  defer: f.close()
+
+  var magic = f.readStr("SerpentsSave".len)
+  if magic != "SerpentsSave":
+    echo "This is not a SerpentsSave game"
+    return false
+  # globals
+  age = f.readUint8().int
+  turn = f.readUint16().int
+  guideMode = f.readUint8().bool
+  guideStep = f.readUint8().int
+  # load cards
+  clearCardMoves()
+
+  destinyPile = newPile("Destiny", pkAllFaceDown)
+  destinyPile.pos = vec2i(2, screenHeight - cardHeight - 2)
+
+  let nDestiny = f.readUint16().int
+  for i in 0..<nDestiny:
+    let c = f.loadCard()
+    destinyPile.add(c)
+
+  destinyDiscardPile = newPile("Destiny Discard", pkHidden)
+  destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
+
+  let nDestinyDiscard = f.readUint16().int
+  for i in 0..<nDestinyDiscard:
+    let c = f.loadCard()
+    destinyDiscardPile.add(c)
+  currentDestiny = f.loadCard()
+  currentDestiny.pos = vec2f(screenWidth div 4 + 10, screenHeight - cardHeight - 2)
+  # go through each town and load it
+  var nTowns = f.readUint8().int
+  towns = @[]
+  homeTown = nil
+  homeTotem = nil
+  for i in 0..<nTowns:
+    var town = f.loadTown()
+    towns.add(town)
+    if town.isHometown:
+      currentTown = town
+      homeTown = town
+      for site in town.sites:
+        if site.settings == siteSerpent or site.settings == siteSerpent2 or site.settings == siteSerpent3:
+          homeTotem = site
+  if homeTown == nil or homeTotem == nil:
+    echo "couldn't find hometown or totem"
+    return false
+  return true
 
 proc saveUndo() =
   when not defined(js):
@@ -2230,6 +2754,7 @@ proc undo() =
 proc startRelocate() =
   saveUndo()
   inputMode = Relocate
+  selectedUnit = nil
   placingUnits = @[]
   currentTown.actions -= 1
   actionFlash += 5
@@ -2242,6 +2767,10 @@ proc hasMovedUnits(): bool =
   var unitsMoved = 0
   for site in currentTown.sites:
     for u in site.units:
+      if u.site != u.sourceSite:
+        unitsMoved += 1
+  for army in armies:
+    for u in army.units:
       if u.site != u.sourceSite:
         unitsMoved += 1
 
@@ -2277,62 +2806,92 @@ proc placeUnit(site: Site) =
   selectedSite = site
   sfx(0)
 
-proc gameGui() =
+proc mainMenuGui() =
+  G.hintOnly = false
   G.normalColor = 15
-  G.buttonBackgroundColor = 31
-  G.buttonBackgroundColorDisabled = 1
-  G.hoverColor = 22
-  G.activeColor = 21
-  G.textColor = 22
-  G.hintColor = 8
-  G.downColor = 15
-  G.disabledColor = 25
-  G.backgroundColor = 1
-  G.hSpacing = 3
-  G.vSpacing = 3
-  G.hPadding = 4
-  G.vPadding = 4
+  G.beginArea(screenWidth div 2 - 150, screenHeight div 2 - 100, 300, 200, gTopToBottom, true, true)
+  G.hExpand = true
+  G.center = true
 
-  if mainMenu:
-    G.beginArea(screenWidth div 2 - 100, screenHeight div 2 - 70, 200, 175, gTopToBottom, true, true)
-    G.hExpand = true
-    G.center = true
-    G.label("<21>Serpent's Souls</>")
-    G.label("A game by <8>Impbox</> for <27>LD43</>")
-    if G.button("Continue"):
-      mainMenu = false
+  if optionsMenu:
+    setFont(1)
+    G.label("<21>Options</>")
+    setFont(0)
     G.empty(5,5)
     if G.button("Focus Follows Mouse = " & (if focusFollowsMouse: "On" else: "Off")):
       focusFollowsMouse = not focusFollowsMouse
-    if G.button("Save"):
-      mainMenu = false
-    if G.button("Load"):
-      mainMenu = false
+      updateConfigValue("General","focusFollowsMouse", $focusFollowsMouse)
+      saveConfig()
     G.empty(5,5)
-    if G.button("Restart"):
-      mainMenu = false
-      gameInit()
+    if G.button("Back"):
+      optionsMenu = false
+
+  else:
+    setFont(1)
+    G.label("<21>Serpent's Souls</>")
+    setFont(0)
+    G.label("A game by <8>Impbox</> for <27>LD43</>")
+    G.empty(5,5)
+
+    if not gameStarted:
+      if G.button("Start Game"):
+        gameStarted = true
+        mainMenu = false
+        newGame()
+
+      if G.button("Tutorial"):
+        gameStarted = true
+        mainMenu = false
+        guideMode = true
+        newGame()
+
+      if G.button("Continue", saveExists):
+        if loadGame():
+          gameStarted = true
+          mainMenu = false
+
+    else:
+      if G.button("Continue", saveExists):
+        mainMenu = false
+
+      G.empty(5,5)
+      if G.button("End Game"):
+        gameStarted = false
+
+    G.empty(5,5)
+    if G.button("Options"):
+      optionsMenu = true
+    G.empty(5,5)
     if G.button("Quit"):
       shutdown()
-    G.center = false
-    G.hExpand = false
-    G.endArea()
 
-  if areYouSure:
-    G.beginArea(screenWidth div 2 - 200, screenHeight div 2 - 30, 400, 70, gTopToBottom, true, true)
-    G.label(areYouSureMessage)
-    G.beginHorizontal(30)
-    if G.button("Yes", true, K_1):
-      if areYouSureYes != nil:
-        areYouSureYes()
-      areYouSure = false
-    if G.button("No", true, K_2):
-      if areYouSureNo != nil:
-        areYouSureNo()
-      areYouSure = false
-    G.endArea()
-    G.endArea()
+  G.center = false
+  G.hExpand = false
+  G.endArea()
 
+proc gameGuiBattle() =
+  # bottom bar
+  G.beginArea(0, screenHeight - 31, screenWidth, 28, gRightoLeft)
+  G.center = true
+
+  if turnPhase == phaseTurn:
+    if G.button("<21>E</>nd Turn", 100, 28, true, K_E):
+      tryEndTurn()
+    if G.hoverElement == G.element or G.downElement == G.element:
+      hoveringOverEndTurn = true
+    else:
+      G.empty(100, 28)
+  else:
+    discard G.button(100, 28, false, K_UNKNOWN) do(x,y,w,h: int, enabled: bool):
+      pal(29,0)
+      spr(48 + ((frame div 5).int mod 4) * 2, x + w div 2 - 8, y, 2, 2)
+      pal()
+    discard G.button($turnPhase, 148, 28, false)
+
+  G.endArea()
+
+
+proc gameGuiTown() =
   # right bar
   G.beginArea(screenWidth - 160, 3, 160 - 3, screenHeight - 36, gTopToBottom, true)
   G.center = true
@@ -2343,6 +2902,7 @@ proc gameGui() =
   if inputMode == ChooseAbilityToLearn:
     var shaman = selectedUnit
     G.label("Choose Skill to Learn")
+    G.label("<spr(7,6,8)>".repeat(shaman.souls))
     G.center = false
     var i = 0
     for a in shamanAbilities:
@@ -2356,7 +2916,6 @@ proc gameGui() =
         shaman.site.town.actions -= a.nActions
         shaman.souls -= a.nSoulsToUnlock
         shaman.abilities.add(a)
-        shaman.usedAbility = true
       i += 1
 
     G.empty(10,10)
@@ -2408,8 +2967,8 @@ proc gameGui() =
       if G.hoverElement == G.element or G.downElement == G.element:
         hoveringOverAbility = true
       i += 1
-    if i < 4:
-      if G.button("<spr(24)> Learn new <21>S</>kill", 148, 20, selectedUnit.usedAbility == false, K_S):
+    if i < 5:
+      if G.button("Learn new <21>S</>kill", 148, 50, true, K_S):
         inputMode = ChooseAbilityToLearn
 
     G.hExpand = false
@@ -2467,7 +3026,7 @@ proc gameGui() =
 
   if turnPhase == phaseTurn:
     if inputMode == SelectSite or inputMode == Relocate:
-      if G.button("<21>E</>nd Turn", 100, 28, placingUnits.len == 0 and endTurnLocked == false, K_E):
+      if G.button("<21>E</>nd Turn", 100, 28, placingUnits.len == 0, K_E):
         tryEndTurn()
       if G.hoverElement == G.element or G.downElement == G.element:
         hoveringOverEndTurn = true
@@ -2480,6 +3039,14 @@ proc gameGui() =
             destinyPile.add(cm.c)
     else:
       G.empty(100, 28)
+
+    if currentArmy != nil:
+      if inputMode == SelectSite:
+        if G.button("<21>R</>elocate Army", 148, 28, currentArmy.moved == false, K_R):
+          inputMode = MoveArmy
+      elif inputMode == MoveArmy:
+        if G.button("Cancel <21>R</>elocation", 148, 28, true, K_R):
+          inputMode = SelectSite
 
     if currentTown != nil:
       if inputMode == Relocate:
@@ -2501,19 +3068,22 @@ proc gameGui() =
 
   G.endArea()
 
-  if guideStep < guide.len:
+  if guideMode and guideStep < guide.len:
     G.hintOnly = true
     let gs = guide[guideStep]
     G.center = false
+    G.backgroundColor = 31
+    G.textColor = 22
+    G.normalColor = 22
     G.beginArea(screenWidth div 4 + 4, 56, screenWidth div 2 - 8, 50, gTopToBottom, true)
     G.labelStep(gs.text, guideStepTextStep)
-    if frame mod 3 == 0 or mousebtn(0):
+    if mainMenu == false and (frame mod 3 == 0 or mousebtn(0)):
       guideStepTextStep += 1
-    if guideStepTextStep >= gs.text.len:
+    if guideStepTextStep >= gs.text.richPrintCount:
       if gs.clickNext:
-        G.hintHotkey = K_N
+        G.hintHotkey = K_X
         G.hintOnly = true
-        if G.button("<21>N</>ext", true, K_N):
+        if G.button("Ne<21>x</>t", true, K_X):
           guideStep += 1
           guideStepTextStep = 0
           G.hintHotkey = K_UNKNOWN
@@ -2530,6 +3100,11 @@ proc gameGui() =
     hintSite = nil
     guideMode = false
 
+  G.normalColor = 15
+  G.backgroundColor = 1
+  G.textColor = 22
+
+
   # town info
   G.beginArea(screenWidth div 4 + 4, 3, screenWidth div 2 - 8, 50, gTopToBottom, true)
   G.center = false
@@ -2544,10 +3119,17 @@ proc gameGui() =
     setFont(0)
     G.textColor = 22
     G.empty(32,0)
-    G.label("Age " & $age & "  Day " & $turn & "/" & $ageCardCount[age-1])
+    G.label("Age " & $age & "  Day " & $turn)
     G.endArea()
 
-    if (actionFlash > 0 or (hoveringOverEndTurn and currentTown.actions > 0)) and frame mod flashMod < flashCmp:
+    var shamanActions = 0
+    for site in currentTown.sites:
+      for u in site.units:
+        if u.kind == Shaman:
+          if u.usedAbility == false:
+            shamanActions += 1
+
+    if (actionFlash > 0 or (hoveringOverEndTurn and (currentTown.actions > 0 or shamanActions > 0))) and frame mod flashMod < flashCmp:
       pal(1,21)
       actionFlash -= 1
     var actionsStr = "Actions: "
@@ -2603,6 +3185,47 @@ proc gameGui() =
 
   G.endArea()
 
+
+proc gameGui() =
+  G.normalColor = 15
+  G.buttonBackgroundColor = 31
+  G.buttonBackgroundColorDisabled = 1
+  G.hoverColor = 22
+  G.activeColor = 21
+  G.textColor = 22
+  G.hintColor = 8
+  G.downColor = 15
+  G.disabledColor = 25
+  G.backgroundColor = 1
+  G.hSpacing = 3
+  G.vSpacing = 3
+  G.hPadding = 4
+  G.vPadding = 4
+
+  if mainMenu and not gameStarted:
+    mainMenuGui()
+    return
+
+  if areYouSure:
+    G.beginArea(screenWidth div 2 - 200, screenHeight div 2 - 30, 400, 70, gTopToBottom, true, true)
+    G.label(areYouSureMessage)
+    G.beginHorizontal(30)
+    if G.button("Yes", true, K_1):
+      if areYouSureYes != nil:
+        areYouSureYes()
+      areYouSure = false
+    if G.button("No", true, K_2):
+      if areYouSureNo != nil:
+        areYouSureNo()
+      areYouSure = false
+    G.endArea()
+    G.endArea()
+
+  if currentBattle != nil:
+    gameGuiBattle()
+  elif currentTown != nil:
+    gameGuiTown()
+
   G.hSpacing = 3
   G.vSpacing = 3
   G.hPadding = 4
@@ -2624,36 +3247,10 @@ proc gameGui() =
 
   drawCards()
 
-proc gameUpdate(dt: float32) =
-  time += dt
+  if mainMenu:
+    mainMenuGui()
 
-  if updateCards(dt):
-    return
-
-  G.update(gameGui, dt)
-
-  case turnPhase:
-    of phaseStartOfTurn:
-      if phaseTimer >= 0 and not cardsMoving():
-        phaseTimer -= dt
-        if phaseTimer < 0:
-          turnPhase = phaseTurn
-      return
-    of phaseEndOfTurn:
-      if phaseTimer >= 0 and not cardsMoving():
-        phaseTimer -= dt
-        if phaseTimer < 0:
-          startTurn()
-      return
-    else:
-      discard
-
-  if(btnp(pcBack)):
-    mainMenu = not mainMenu
-
-  if G.activeElement != 0 or G.hoverElement != 0 or G.modalArea != 0:
-    return
-
+proc townUpdate(self: Town, dt: float32) =
   if mousebtnp(2):
     undo()
     return
@@ -2664,39 +3261,29 @@ proc gameUpdate(dt: float32) =
   hoverSite = nil
   var (mx,my) = mouse()
 
-  if currentTown != nil:
-    for site in currentTown.sites:
-      for u in site.units:
-        if u.hp <= 0:
-          newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
+  for site in sites:
+    for u in site.units:
+      if u.hp <= 0:
+        newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
 
-  for town in towns:
-    for site in town.sites:
-      for u in site.units:
-        if u.hp <= 0:
-          if u.kind == Rebel:
-            town.nRebelsKilled += 1
-      site.units.keepItIf(it.hp > 0)
+  for i, site in sites:
+    if site != nil:
+      if hintSite == nil or hintSite == site:
+        let cx = screenWidth div 2 - width * 25
+        let cy = screenHeight div 2 - height * 25
 
-  if currentTown != nil:
-    for i, site in currentTown.sites:
-      if site != nil:
-        if hintSite == nil or hintSite == site:
-          let cx = screenWidth div 2 - currentTown.width * 25
-          let cy = screenHeight div 2 - currentTown.height * 25
+        let x = i mod width
+        let y = i div width
 
-          let x = i mod currentTown.width
-          let y = i div currentTown.width
-
-          if mx >= cx + x * 50 and my >= cy + y * 50 and mx <= cx + x * 50 + 48 and my <= cy + y * 50 + 48:
-            hoverSite = site
-            if focusFollowsMouse:
-              if hintSite == nil or hintSite == hoverSite:
-                selectedSite = hoverSite
-          for u in site.units:
-            if mx >= u.pos.x - 1 and mx <= u.pos.x + 7 and my >= u.pos.y - 1 and my <= u.pos.y + 7:
-              hoverUnit = u
-              break
+        if mx >= cx + x * 50 and my >= cy + y * 50 and mx <= cx + x * 50 + 48 and my <= cy + y * 50 + 48:
+          hoverSite = site
+          if focusFollowsMouse:
+            if hintSite == nil or hintSite == hoverSite:
+              selectedSite = hoverSite
+        for u in site.units:
+          if mx >= u.pos.x - 1 and mx <= u.pos.x + 7 and my >= u.pos.y - 1 and my <= u.pos.y + 7:
+            hoverUnit = u
+            break
 
   if hoverUnit != lastHoverUnit or hoverSite != lastHoverSite:
     hoverChangeTime = time
@@ -2716,13 +3303,18 @@ proc gameUpdate(dt: float32) =
         onSelectUnit(hoverUnit)
         return
 
-  if inputMode == SelectSite and doubleClick:
-    if hoverUnit != nil:
-      if currentTown.actions >= 1:
-        startRelocate()
-        if hoverUnit.kind != Rebel:
-          grabUnit(hoverUnit)
-      return
+  if inputMode == SelectSite:
+    if doubleClick:
+      if hoverUnit != nil:
+        if actions >= 1:
+          startRelocate()
+          if hoverUnit.kind != Rebel:
+            grabUnit(hoverUnit)
+        return
+    elif mousebtnp(0):
+      selectedSite = hoverSite
+      if hoverUnit != nil and hoverUnit.kind == Shaman:
+        selectedUnit = hoverUnit
 
   if inputMode == Relocate or inputMode == PlaceUnit:
     if inputMode == Relocate and placingUnits.len == 0 and doubleClick and hoverUnit == nil:
@@ -2738,7 +3330,7 @@ proc gameUpdate(dt: float32) =
         pulling = false
 
     if mousebtnpr(0,15):
-      if pulling:
+      if pulling and inputMode == Relocate:
         # grab unit
         if hoverUnit != nil and hoverSite != nil:
           if hoverUnit.kind == Rebel or hoverUnit.kind == Neutral:
@@ -2753,247 +3345,516 @@ proc gameUpdate(dt: float32) =
             if placingUnits.len == 0 and inputMode == PlaceUnit:
               inputMode = SelectSite
 
-  if btnpr(pcStart, 30):
-    tryEndTurn()
+proc mget(self: Battle, pos: Vec2i): int =
+  if pos.x < 0 or pos.y < 0 or pos.x >= width or pos.y >= height:
+    return 0
+  return map[pos.y * width + pos.x]
+
+proc move(self: Battle, unit: Unit, dest: Vec2i) =
+  if manhattanDist(unit.battlePos, dest) == 1:
+    moves.add(BattleMove(unit: unit, path: @[dest]))
+  else:
+    let pathinfo = dijkstra(unit.battlePos, unit.moveDist, unit)
+    var path: seq[Vec2i]
+    var pos = dest
+    path.add(pos)
+    var distprev = pathinfo[pos]
+    while distprev[1][0]:
+      let prev = distprev[1][1]
+      distprev = pathinfo[prev]
+      pos = prev
+      path.add(pos)
+    path.reverse()
+    moves.add(BattleMove(unit: unit, path: path))
+
+proc attack(self: Battle, attacker, defender: Unit) =
+  let dir = defender.battlePos - attacker.battlePos
+  echo "attacker: ", attacker.battlePos, " ", attacker.team, "  ", attacker.kind, " dir: ", dir
+  echo "defender: ", defender.battlePos, " ", defender.team, "  ", defender.kind, " hp: ", defender.hp
+  # check if area behind defender is free
+  if not occupied(defender, defender.battlePos + dir, true):
+    echo "empty space at ", defender.battlePos + dir
+    let oldPos = defender.battlePos
+    move(defender, defender.battlePos + dir)
+    move(attacker, oldPos)
+    # check if new position is adjacent to another attacker team unit (but not the attacker)
+    for u in units:
+      if u.team == attacker.team and u != attacker:
+        if manhattanDist(u.battlePos, defender.battlePos) == 1:
+          echo "pincered, dealing damage"
+          defender.hp -= 1
+          break
+  else:
+    echo "can't retreat, dealing damage"
+    defender.hp -= 1
+    if not occupied(attacker, defender.battlePos, true):
+      echo "moving into empty space"
+      move(attacker, defender.battlePos)
+  attacker.battleAttacked = true
+  attacker.battleMoved = true
+  pauseTimer = 0.5
+
+proc battleUpdateCommon(self: Battle, dt: float32) =
+  for u in units:
+    if u.hp <= 0:
+      newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
+  units.keepItIf(it.hp > 0)
+
+  if pauseTimer > 0:
+    pauseTimer -= dt
+    return
+
+  for move in moves.mitems:
+    if move.time > 0:
+      move.time -= dt
+    else:
+      # check if new space is adjacent to two enemies
+      move.unit.battlePos = move.path[move.index]
+      move.time = 0.1
+
+      # check for traps
+      if isTrap(move.unit, move.unit.battlePos, true):
+        echo "moved into trap, dealing damage ", move.unit.battlePos
+        move.unit.hp -= 1
+        move.index = move.path.high
+        pauseTimer = 0.5
+
+      move.index += 1
+      if move.index == move.path.len:
+        pauseTimer = 0.5
+
+    #for u in units:
+    #  if isTrap(u, u.battlePos, true):
+    #    u.hp -= 1
+  revealHidden()
+
+  moves.keepItIf(it.index < it.path.len)
+
+
+
+proc battleUpdate(self: Battle, dt: float32) =
+  battleUpdateCommon(dt)
+
+  if moves.len > 0:
+    return
+
+  let cx = screenWidth div 2 - width * 8
+  let cy = screenHeight div 2 - height * 8
+  var (mx,my) = mouse()
+  hoverUnit = nil
+
+  if selectedUnit notin units:
+    selectedUnit = nil
+
+  var playerUnits = 0
+  var enemyUnits = 0
+  for u in units:
+    if u.team == 1:
+      playerUnits += 1
+    else:
+      enemyUnits += 1
+
+    if mx >= u.pos.x - 1 and mx <= u.pos.x + 7 and my >= u.pos.y - 1 and my <= u.pos.y + 7:
+      if u.hidden == false or u.team == 1:
+        hoverUnit = u
+
+  if playerUnits == 0:
+    currentBattle = nil
+    echo "BATTLE LOST"
+    return
+  elif enemyUnits == 0:
+    echo "BATTLE WON"
+    currentBattle = nil
     return
 
   if mousebtnp(0):
-    var (mx,my) = mouse()
-    # check which thing they clicked on
-    if mx < screenWidth div 4 and (inputMode == SelectSite or inputMode == Relocate or inputMode == MoveArmy):
-      # choose town or army on worldMap
+    if hoverUnit != nil and hoverUnit.team == 1:
+      selectedUnit = hoverUnit
+      selectedUnitMoves = dijkstra(selectedUnit.battlePos, selectedUnit.moveDist, selectedUnit)
+    else:
+      if selectedUnit != nil:
+        # check if this is a movable area
+        let tx = (mx - cx) div 16
+        let ty = (my - cy) div 16
+        let tpos = vec2i(tx,ty)
+        var occupied = false
+        var occupiedBy: Unit = nil
+        for u in units:
+          if u.battlePos == tpos:
+            occupied = true
+            occupiedBy = u
+            break
+        if not occupied and selectedUnit.battleMoved == false:
+          if selectedUnitMoves.hasKey(tpos):
+            let distprev = selectedUnitMoves[tpos]
+            let dist = distprev[0]
+            let prev = distprev[1][1]
+            if dist <= selectedUnit.moveDist:
+              move(selectedUnit, tpos)
+              selectedUnit.battleMoved = true
+        elif occupiedBy != nil and occupiedBy.team != 1 and selectedUnit.battleAttacked == false:
+          # enemy, attack if in range
+          if manhattanDist(selectedUnit.battlePos, occupiedBy.battlePos) == 1:
+            attack(selectedUnit, occupiedBy)
+        else:
+          selectedUnit = nil
+          echo "selected nothing"
+
+proc manhattanDist(a, b: Vec2i): int =
+  return abs(a.x - b.x) + abs(a.y - b.y)
+
+proc calculatePossibleMoves(self: Battle, u: Unit, reality = true): seq[(Vec2i,bool)] =
+  # get all possible moves
+  var possibleMoves: seq[(Vec2i,bool)] = @[]
+  let costs = self.dijkstra(u.battlePos, 99999, u)
+  for y in 0..<height:
+    for x in 0..<width:
+      let pos = vec2i(x,y)
+      let distprev = costs[pos]
+      if distprev[0] <= u.moveDist:
+        var occupied = false
+        if not occupied(u, pos, reality):
+          possibleMoves.add((pos,false))
+  return possibleMoves
+
+proc calculatePossibleMoveAttacks(self: Battle, u: Unit, reality = true): seq[(Vec2i,bool)] =
+  # get all possible moves + attacks
+  var moves = calculatePossibleMoves(u, reality)
+  var attacks: seq[(Vec2i,bool)]
+  for pos in self:
+    for move in moves:
+      if manhattanDist(move[0], pos) == 1:
+        if (pos,false) notin moves:
+          attacks.add((pos,true))
+  moves.add(attacks)
+  return moves
+
+proc occupied(self: Battle, unit: Unit, pos: Vec2i, reality = true): bool =
+  if pos.x < 0 or pos.y < 0 or pos.x >= width or pos.y >= height:
+    return true
+  if mget(pos) == 4:
+    return true
+  for u in units:
+    if u.battlePos == pos and u.hp > 0:
+      if not reality and u.hidden and u.team != unit.team:
+        continue
+      return true
+  return false
+
+proc calculateMove(self: Battle, u: Unit): seq[Vec2i] =
+  # find nearest enemy
+  var nearestEnemy: Unit = nil
+  var nearestTargetPos: Vec2i
+  var nearestDist: int = 99999
+  let costs = dijkstra(u.battlePos, 99999, u)
+  for u2 in units:
+    if u2.team != u.team:
+      if mget(u2.battlePos) != 3 or manhattanDist(u2.battlePos, u.battlePos) < 2:
+        for n in neighbors(u2.battlePos, u2.battlePos):
+          if costs[n][0] < nearestDist and not occupied(u, n, false) and not isTrap(u, n, false):
+            nearestDist = costs[n][0]
+            nearestEnemy = u2
+            nearestTargetPos = n
+
+  var endPos = u.battlePos
+  if nearestEnemy != nil:
+    # follow the path back from them to the furthest one we can move to
+    var pos = nearestTargetPos
+    var dist = costs[pos][0]
+    while dist > u.moveDist:
+      if costs[pos][1][0]:
+        pos = costs[pos][1][1]
+        dist = costs[pos][0]
+      else:
+        break
+    if dist <= u.moveDist and occupied(u, pos, false) == false:
+      endPos = pos
+
+  var pos = endPos
+  result.add(pos)
+  while true:
+    if pos == u.battlePos or costs[pos][1][0] == false:
+      break
+    pos = costs[pos][1][1]
+    result.add(pos)
+
+iterator countupordown[T](a,b: T): T =
+  if a < b:
+    for i in countup(a+1, b-1):
+      yield i
+  else:
+    for i in countdown(a-1, b+1):
+      yield i
+
+proc revealHidden(self: Battle) =
+  for u in units:
+    if mget(u.battlePos) == 3:
+      # check if adjacent to enemy
+      u.hidden = true
+      for u2 in units:
+        if u2.team != u.team and manhattanDist(u.battlePos, u2.battlePos) == 1:
+          u.hidden = false
+    else:
+      # check LoS
+      u.hidden = true
+      for u2 in units:
+        if u2.team != u.team:
+          let a = u2.battlePos
+          let b = u.battlePos
+          if manhattanDist(a,b) == 1:
+            u.hidden = false
+          else:
+            var blocked = false
+            if a.x == b.x or a.y == b.y: # los travels along axes
+              if a.y == b.y:
+                for x in countupordown(a.x,b.x):
+                  if self.mget(vec2i(x, a.y)) == 2:
+                    blocked = true
+                    break
+              elif a.x == b.x:
+                for y in countupordown(a.y,b.y):
+                  if mget(vec2i(a.x, y)) == 2:
+                    blocked = true
+                    break
+              if not blocked:
+                u.hidden = false
+
+proc battleEndTurn(self: Battle, dt: float32): bool =
+  battleUpdateCommon(dt)
+
+  if moves.len > 0:
+    return true
+
+  var moved = false
+  for u in units:
+    if u.team != 1:
+      if not u.battleMoved:
+        var moves = calculateMove(u)
+        if moves.len > 0:
+          move(u, moves[0])
+          u.battleMoved = true
+          return true
+
+      if not u.battleAttacked:
+        # check if they can attack
+        for u2 in units:
+          if u2.team != u.team:
+            if manhattanDist(u.battlePos, u2.battlePos) == 1:
+              attack(u, u2)
+              return true
+
+  return false
+
+
+proc worldMapUpdate(dt: float32) =
+  var (mx,my) = mouse()
+  if mx < screenWidth div 4:
+    if mousebtnp(0):
+      # select town or army or battle
       let tx = mx div 8
       let ty = my div 8
-      if inputMode == MoveArmy and currentArmy != nil:
-        if abs(tx - currentArmy.pos.x) <= 1 and abs(ty - currentArmy.pos.y) <= 1 and (tx == currentArmy.pos.x and ty == currentArmy.pos.y) == false:
-          for town in towns:
-            if town.pos.x == tx and town.pos.y == ty:
-              # move army into town
-              currentTown = town
-              if currentTown.team != 1:
-                for s in currentTown.sites:
-                  for u in s.units:
-                    if u.kind == Neutral:
-                      u.setKind(Rebel)
-                      u.flash = 5
-              currentTown.team = 1
-              undoStack = @[]
-              selectedSite = nil
-              placingUnits = currentArmy.units
-              inputMode = Relocate
-              armies.delete(armies.find(currentArmy))
-              currentArmy = nil
-              return
-          currentArmy.pos = vec2i(tx, ty)
-          currentArmy.moved = true
-          inputMode = SelectSite
-          return
 
-      if inputMode == Relocate:
-        if placingUnits.len == 0:
-          # pick up army
-          if abs(tx - currentTown.pos.x) <= 1 and abs(ty - currentTown.pos.y) <= 1 and (tx == currentTown.pos.x and ty == currentTown.pos.y) == false:
-            var army: Army = nil
-            for i, army in armies:
-              if army.pos.x == tx and army.pos.y == ty:
-                if army.team == 1:
-                  placingUnits = army.units
-                  armies.delete(i)
-                  return
-        else:
-          # place army
-          if abs(tx - currentTown.pos.x) <= 1 and abs(ty - currentTown.pos.y) <= 1 and (tx == currentTown.pos.x and ty == currentTown.pos.y) == false:
-            var army: Army = nil
-            for a in armies:
-              if a.pos.x == tx and a.pos.y == ty:
-                army = a
-                break
-            if army != nil:
-              if army.team != 1:
-                return
-            if army == nil:
-              army = newArmy(vec2i(tx,ty), 1, placingUnits)
-              army.source = currentTown
-              army.moved = true
-              armies.add(army)
-            else:
-              army.units.add(placingUnits)
-              army.moved = true
-            placingUnits = @[]
-            return
-      elif inputMode == SelectSite:
-        for town in towns:
-          if town.pos.x == tx and town.pos.y == ty:
-            currentTown = town
-            currentArmy = nil
-            selectedSite = nil
-            break
-        for army in armies:
-          if army.pos.x == tx and army.pos.y == ty:
-            currentArmy = army
-            currentTown = nil
-            selectedSite = nil
-            break
+      for town in towns:
+        if town.pos.x == tx and town.pos.y == ty:
+          currentTown = town
+          currentBattle = nil
+          currentArmy = nil
+          break
 
-    elif inputMode == SelectSite:
-      selectedUnit = nil
-      # select shaman
-      if hoverUnit != nil and hoverUnit.kind == Shaman:
-        selectedUnit = hoverUnit
-        if currentTown != nil:
-          for site in currentTown.sites:
-            if site != nil:
-              for u in site.units:
-                if u == selectedUnit:
-                  selectedSite = site
-                  break
-        return
+      for army in armies:
+        if army.pos.x == tx and army.pos.y == ty:
+          currentArmy = army
+          currentTown = nil
+          currentBattle = nil
+          break
 
-    if currentTown != nil:
-      # select site
-      var sx = screenWidth div 2 - 25 * currentTown.width
-      var sy = screenHeight div 2 - 25 * currentTown.height
-      mx -= sx
-      my -= sy
-      let tx = mx div 50
-      let ty = my div 50
-      if tx >= 0 and tx < currentTown.width and ty >= 0 and ty < currentTown.height:
-        var site = currentTown.sites[ty * currentTown.width + tx]
-        if site != nil:
-          if inputMode == SelectSite:
-            if hintSite == nil or hintSite == hoverSite:
-              selectedSite = site
+      for battle in battles:
+        if battle.pos.x == tx and battle.pos.y == ty:
+          currentBattle = battle
+          currentTown = nil
+          currentArmy = nil
+          break
+
+proc gameUpdate(dt: float32) =
+  time += dt
+
+  if(btnp(pcBack)):
+    mainMenu = not mainMenu
+
+  G.update(gameGui, dt)
+
+  if mainMenu:
+    return
+
+  if updateCards(dt):
+    return
+
+  case turnPhase:
+    of phaseStartOfTurn:
+      if phaseTimer >= 0 and not cardsMoving():
+        phaseTimer -= dt
+        if phaseTimer < 0:
+          saveGame()
+          turnPhase = phaseTurn
+      return
+    of phaseEndOfTurn:
+      if not cardsMoving() and battlesWaging:
+        battlesWaging = false
+        for battle in battles:
+          if battle.battleEndTurn(dt):
+            battlesWaging = true
+      elif phaseTimer >= 0 and not cardsMoving() and not battlesWaging:
+        phaseTimer -= dt
+        if phaseTimer < 0:
+          startTurn()
+      return
+    else:
+      discard
+
+  for town in towns:
+    for site in town.sites:
+      for u in site.units:
+        if u.hp <= 0:
+          if u.kind == Rebel:
+            town.nRebelsKilled += 1
+      site.units.keepItIf(it.hp > 0)
+
+  if G.activeElement != 0 or G.hoverElement != 0 or G.modalArea != 0:
+    return
+
+  if currentBattle != nil:
+    currentBattle.battleUpdate(dt)
+  elif currentTown != nil:
+    townUpdate(currentTown, dt)
+
+  worldMapUpdate(dt)
+
+  #if mousebtnp(0):
+  #  var (mx,my) = mouse()
+  #  # check which thing they clicked on
+  #  if mx < screenWidth div 4 and (inputMode == SelectSite or inputMode == Relocate or inputMode == MoveArmy):
+  #    # choose town or army on worldMap
+  #    let tx = mx div 8
+  #    let ty = my div 8
+  #    if inputMode == MoveArmy and currentArmy != nil:
+  #      if abs(tx - currentArmy.pos.x) <= 1 and abs(ty - currentArmy.pos.y) <= 1 and (tx == currentArmy.pos.x and ty == currentArmy.pos.y) == false:
+  #        for town in towns:
+  #          if town.pos.x == tx and town.pos.y == ty:
+  #            # move army into town
+  #            currentTown = town
+  #            if currentTown.team != 1:
+  #              for s in currentTown.sites:
+  #                for u in s.units:
+  #                  if u.kind == Neutral:
+  #                    u.setKind(Rebel)
+  #                    u.flash = 5
+  #            currentTown.team = 1
+  #            undoStack = @[]
+  #            selectedSite = nil
+  #            placingUnits = currentArmy.units
+  #            inputMode = PlaceUnit
+  #            armies.delete(armies.find(currentArmy))
+  #            currentArmy = nil
+  #            return
+  #        currentArmy.pos = vec2i(tx, ty)
+  #        currentArmy.moved = true
+  #        inputMode = SelectSite
+  #        return
+
+  #    if inputMode == Relocate:
+  #      if placingUnits.len == 0:
+  #        # pick up army
+  #        if abs(tx - currentTown.pos.x) <= 1 and abs(ty - currentTown.pos.y) <= 1 and (tx == currentTown.pos.x and ty == currentTown.pos.y) == false:
+  #          var army: Army = nil
+  #          for i, army in armies:
+  #            if army.pos.x == tx and army.pos.y == ty:
+  #              if army.team == 1:
+  #                placingUnits = army.units
+  #                armies.delete(i)
+  #                return
+  #      else:
+  #        # place army
+  #        if abs(tx - currentTown.pos.x) <= 1 and abs(ty - currentTown.pos.y) <= 1 and (tx == currentTown.pos.x and ty == currentTown.pos.y) == false:
+  #          var army: Army = nil
+  #          for a in armies:
+  #            if a.pos.x == tx and a.pos.y == ty:
+  #              army = a
+  #              break
+  #          if army != nil:
+  #            if army.team != 1:
+  #              return
+  #          if army == nil:
+  #            army = newArmy(vec2i(tx,ty), 1, placingUnits)
+  #            army.source = currentTown
+  #            army.moved = true
+  #            armies.add(army)
+  #          else:
+  #            for u in placingUnits:
+  #              u.site = nil
+  #            army.units.add(placingUnits)
+  #            army.moved = true
+  #          placingUnits = @[]
+  #          return
+  #    elif inputMode == SelectSite:
+  #      for town in towns:
+  #        if town.pos.x == tx and town.pos.y == ty:
+  #          currentTown = town
+  #          currentArmy = nil
+  #          selectedSite = nil
+  #          break
+  #      for army in armies:
+  #        if army.pos.x == tx and army.pos.y == ty:
+  #          currentArmy = army
+  #          currentTown = nil
+  #          selectedSite = nil
+  #          break
+
+  #  elif inputMode == SelectSite:
+  #    selectedUnit = nil
+  #    # select shaman
+  #    if hoverUnit != nil and hoverUnit.kind == Shaman:
+  #      selectedUnit = hoverUnit
+  #      if currentTown != nil:
+  #        for site in currentTown.sites:
+  #          if site != nil:
+  #            for u in site.units:
+  #              if u == selectedUnit:
+  #                selectedSite = site
+  #                break
+  #      return
+
+  #  if currentTown != nil:
+  #    # select site
+  #    var sx = screenWidth div 2 - 25 * currentTown.width
+  #    var sy = screenHeight div 2 - 25 * currentTown.height
+  #    if mx < sx or my < sy or mx > sx + currentTown.width * 50 or my > sy + currentTown.height * 50:
+  #      # out of bounds, pan
+  #      discard
+  #    else:
+  #      mx -= sx
+  #      my -= sy
+  #      let tx = mx div 50
+  #      let ty = my div 50
+  #      if tx >= 0 and tx < currentTown.width and ty >= 0 and ty < currentTown.height:
+  #        var site = currentTown.sites[ty * currentTown.width + tx]
+  #        if site != nil:
+  #          if inputMode == SelectSite:
+  #            if hintSite == nil or hintSite == hoverSite:
+  #              selectedSite = site
 
 proc gameDraw() =
   frame += 1
-  setCamera()
-
-  setColor(1)
-  rectfill(0,0,screenWidth,screenHeight)
-
-  if currentArmy != nil:
-    # draw army info
-    setColor(3)
-    rectfill(screenWidth div 4, 0, screenWidth div 4 * 3, screenHeight - 32)
-    setColor(teamColors[currentArmy.team])
-    printc("Army", screenWidth div 2, 20)
-    var x = screenWidth div 2 - currentArmy.units.len * 9
-    var y = screenHeight div 2
-    for i, unit in currentArmy.units:
-      unit.draw(x, y)
-      x += 7
-      if (i + 1) mod 10 == 0:
-        x = screenWidth div 2 - currentArmy.units.len * 9
-        y += 6
-      elif (i + 1) mod 5 == 0:
-        x += 3
-
-  if currentTown != nil:
-    currentTown.draw()
-
-  setCamera()
-
-  block showWorldMap:
-    # World Map
-    setColor(3)
-    rectfill(0,0,screenWidth div 4 - 1, screenHeight - 32)
-
-    setSpritesheet(2)
-    mapDraw(0,0,mapWidth(),mapHeight(),0,0)
-
-    for town in towns:
-      pal(7, teamColors[town.team])
-      spr(7 + town.size, town.pos.x * 8, town.pos.y * 8)
-      pal()
-
-      if town == currentTown:
-        let nActions = 3
-        for i in 0..<nActions*2:
-          let angle = (TAU / (nActions*2).float32) * i.float32 + time
-          setColor(21)
-          if i mod 2 == 0:
-            if town.actions > i div 2:
-              setColor(8)
-            else:
-              setColor(1)
-          circfill(town.pos.x * 8 + 4 + cos(angle) * 8, town.pos.y * 8 + 4 + sin(angle) * 8, 2)
-      elif town.team == 1:
-        let nActions = 3
-        for i in 0..<nActions*2:
-          let angle = (TAU / (nActions*2).float32) * i.float32
-          setColor(21)
-          if i mod 2 == 0:
-            if town.actions > i div 2:
-              setColor(8)
-            else:
-              setColor(1)
-          circfill(town.pos.x * 8 + 4 + cos(angle) * 6, town.pos.y * 8 + 4 + sin(angle) * 6, 2)
-
-
-      if town.actions > 0:
-        setColor(8)
-        printc("(" & $town.actions & ")", town.pos.x * 8 + 4, town.pos.y * 8 - 20)
-
-    for army in armies:
-      pal(7, teamColors[army.team])
-      pal(4, teamColors2[army.team])
-      spr(32, army.pos.x * 8, army.pos.y * 8)
-      pal()
-
-      if army == currentArmy:
-        setColor(21)
-        for i in 0..<7:
-          let angle = (TAU / 7.0) * i.float32 + time
-          circfill(army.pos.x * 8 + 4 + cos(angle) * 8, army.pos.y * 8 + 4 + sin(angle) * 8, 2)
-
-      if army.moved == false:
-        setColor(8)
-        printc("(1)", army.pos.x * 8 + 4, army.pos.y * 8 - 20)
-
-
-  setColor(15)
-  vline(screenWidth div 4, 0, screenHeight - 1)
-
-  setSpritesheet(0)
-
-  setCamera()
-
-  if currentArmy != nil:
-    if inputMode == SelectSite:
-      if currentArmy.moved == false:
-        setColor(22)
-        printc("Move Army", screenWidth div 2, screenHeight - 25)
-      else:
-        setColor(24)
-        printc("Already moved", screenWidth div 2, screenHeight - 25)
-    elif inputMode == MoveArmy:
-      setColor(22)
-      printc("Select Destination", screenWidth div 2, screenHeight - 25)
-
-  # particles
-  for p in mitems(particles):
-    setSpritesheet(p.sheet)
-    if p.text != "":
-      setColor(if frame mod 8 < 4: p.color1 else: p.color2)
-      printOutlineC(p.text, p.pos.x, p.pos.y)
-    else:
-      let a = p.ttl / p.maxTtl
-      let f = lerp(p.startSpr.float32,p.endSpr.float32,a).int
-      spr(f, p.pos.x, p.pos.y)
-    p.pos += p.vel
-    p.ttl -= 1/30
-
-  particles.keepItIf(it.ttl > 0)
-
-  setCamera()
-  G.draw(gameGui)
+  if gameStarted:
+    gameDrawGame()
+  else:
+    gameDrawMenu()
 
   # cursor
   block drawCursor:
     let (mx,my) = mouse()
 
     # tooltip
-    if hoverChangeTime < time - 0.3:
+    if not mainMenu and turnPhase == phaseTurn and hoverChangeTime < time - 0.3:
       setColor(21)
       setOutlineColor(1)
       if hoverUnit == nil and hoverSite != nil:
@@ -3004,7 +3865,9 @@ proc gameDraw() =
     # cursor
     pal(29,0)
     setSpritesheet(0)
-    if phaseTimer > 0:
+    if mainMenu:
+      spr(0, mx, my)
+    elif phaseTimer > 0:
       spr(34 + (frame.int div 10 mod 4), mx - 4, my - 4)
     elif G.downElement != 0:
       spr(40, mx - 1, my - 1)
@@ -3032,6 +3895,134 @@ proc gameDraw() =
           x = 0
           y += 8
 
+
+proc gameDrawMenu() =
+  cls()
+  setCamera()
+  G.draw(gameGui)
+
+proc drawWorldMap() =
+  # World Map
+  setColor(3)
+  rectfill(0,0,screenWidth div 4 - 1, screenHeight - 32)
+
+  setSpritesheet(2)
+  mapDraw(0,0,mapWidth(),mapHeight(),0,0)
+
+  for town in towns:
+    pal(7, teamColors[town.team])
+    spr(7 + town.size, town.pos.x * 8, town.pos.y * 8)
+    pal()
+
+    if town == currentTown:
+      let nActions = 3
+      for i in 0..<nActions*2:
+        let angle = (TAU / (nActions*2).float32) * i.float32 + time
+        setColor(21)
+        if i mod 2 == 0:
+          if town.actions > i div 2:
+            setColor(8)
+          else:
+            setColor(1)
+        circfill(town.pos.x * 8 + 4 + cos(angle) * 8, town.pos.y * 8 + 4 + sin(angle) * 8, 2)
+    elif town.team == 1:
+      let nActions = 3
+      for i in 0..<nActions*2:
+        let angle = (TAU / (nActions*2).float32) * i.float32
+        setColor(21)
+        if i mod 2 == 0:
+          if town.actions > i div 2:
+            setColor(8)
+          else:
+            setColor(1)
+        circfill(town.pos.x * 8 + 4 + cos(angle) * 6, town.pos.y * 8 + 4 + sin(angle) * 6, 2)
+
+
+    if town.actions > 0:
+      setColor(8)
+      printc("(" & $town.actions & ")", town.pos.x * 8 + 4, town.pos.y * 8 - 20)
+
+  for battle in battles:
+    setColor(27)
+    circfill(battle.pos.x * 8 + 4, battle.pos.y * 8 + 4, 4)
+
+  for army in armies:
+    pal(7, teamColors[army.team])
+    pal(4, teamColors2[army.team])
+    spr(32, army.pos.x * 8, army.pos.y * 8)
+    pal()
+
+    if army == currentArmy:
+      setColor(21)
+      for i in 0..<7:
+        let angle = (TAU / 7.0) * i.float32 + time
+        circfill(army.pos.x * 8 + 4 + cos(angle) * 8, army.pos.y * 8 + 4 + sin(angle) * 8, 2)
+
+    if army.moved == false:
+      setColor(8)
+      printc("(1)", army.pos.x * 8 + 4, army.pos.y * 8 - 20)
+
+proc gameDrawGame() =
+  setCamera()
+
+  setColor(1)
+  rectfill(0,0,screenWidth,screenHeight)
+
+  if currentBattle != nil:
+    currentBattle.drawBattle()
+
+  elif currentArmy != nil:
+    # draw army info
+    setColor(3)
+    rectfill(screenWidth div 4, 0, screenWidth div 4 * 3, screenHeight - 32)
+    setColor(teamColors[currentArmy.team])
+    printc("Army", screenWidth div 2, 20)
+    var x = screenWidth div 2 - currentArmy.units.len * 9
+    var y = screenHeight div 2
+    for i, unit in currentArmy.units:
+      unit.draw(x, y)
+      x += 7
+      if (i + 1) mod 10 == 0:
+        x = screenWidth div 2 - currentArmy.units.len * 9
+        y += 6
+      elif (i + 1) mod 5 == 0:
+        x += 3
+
+  elif currentTown != nil:
+    currentTown.draw()
+
+  drawWorldMap()
+
+
+  setColor(15)
+  vline(screenWidth div 4, 0, screenHeight - 1)
+
+  setSpritesheet(0)
+
+  setCamera()
+
+  # particles
+  for p in mitems(particles):
+    setSpritesheet(p.sheet)
+    var pos = if p.hasDest: lerp(p.pos, p.dest, 1.0 - (p.ttl / p.maxTtl)) else: p.pos
+    if p.text != "":
+      setColor(if frame mod 8 < 4: p.color1 else: p.color2)
+      printOutlineC(p.text, pos.x, pos.y)
+    else:
+      let a = p.ttl / p.maxTtl
+      let f = lerp(p.startSpr.float32,p.endSpr.float32,a).int
+      spr(f, pos.x, pos.y)
+
+    if not p.hasDest:
+      p.pos += p.vel
+    p.ttl -= 1/30
+
+  particles.keepItIf(it.ttl > 0)
+
+  setCamera()
+  G.draw(gameGui)
+
+
 # INIT
 nico.init("impbox", "Serpent's Souls")
 
@@ -3051,5 +4042,13 @@ nico.createWindow("ld43", 1920 div 3, 1080 div 3, 2)
 #fps(60)
 fixedSize(false)
 integerScale(true)
+
+loadConfig()
+focusFollowsMouse = parseBool(getConfigValue("General", "focusFollowsMouse", "false"))
+
+try:
+  saveExists = loadGame()
+except:
+  saveExists = false
 
 nico.run(gameInit, gameUpdate, gameDraw)

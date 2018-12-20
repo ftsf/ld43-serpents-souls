@@ -3,6 +3,7 @@ import nico/vec
 import deques
 import tween
 import sequtils
+import streams
 
 {.this:self.}
 
@@ -165,6 +166,9 @@ proc len*(self: Pile): int =
 
 proc clear*(self: Pile) =
   self.cards.clear()
+
+proc clearCardMoves*() =
+  cardMoves = @[]
 
 iterator items*(self: Pile): Card =
   for c in self.cards:

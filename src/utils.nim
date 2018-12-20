@@ -61,7 +61,7 @@ proc printShadow*(text: string, x, y: cint, scale: cint = 1) =
   setColor(oldColor)
   print(text, x, y, scale)
 
-proc richPrintLength*(text: string): int =
+proc richPrintWidth*(text: string): int =
   var i = 0
   while i < text.len:
     let c = text[i]
@@ -88,6 +88,25 @@ proc richPrintLength*(text: string): int =
     i += 1
     result += glyphWidth(c)
 
+proc richPrintCount*(text: string): int =
+  var i = 0
+  while i < text.len:
+    let c = text[i]
+    if c == '<':
+      # scan foward until '>'
+      var k = i + 1
+      if text[k] == '<':
+        result += glyphWidth(c)
+        continue
+      while k < text.len:
+        if text[k] == '>':
+          break
+        k += 1
+      i = k + 1
+      continue
+    i += 1
+    result += 1
+
 proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool = false, step = -1) =
   ## prints but handles color codes <0>black <8>red etc <-> to return to normal
 
@@ -107,7 +126,7 @@ proc richPrint*(text: string, x,y: int, align: TextAlign = taLeft, shadow: bool 
 
   var j = 0
   for text in text.split('\n'):
-    let tlen = richPrintLength(text)
+    let tlen = richPrintWidth(text)
 
     let startColor = getColor()
 
