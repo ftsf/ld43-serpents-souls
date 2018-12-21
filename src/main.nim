@@ -203,9 +203,14 @@ type
     age: int
     pos: Vec2f
     moveDist: int
+    attackMaxDist: int
+    attackMinDist: int
+    attackIndirect: bool
     battlePos: Vec2i
-    battleMoved: bool
-    battleAttacked: bool
+    battleMoves: int
+    battleAttacks: int
+    battleMovesInit: int
+    battleAttacksInit: int
     flash: int
     hp: int
     usedAbility: bool
@@ -278,11 +283,18 @@ type
     nRebelsKilled: int
     nHealed: int
 
+  BattleMoveType = enum
+    bmMove
+    bmAttack
+    bmRetreat
+
   BattleMove = object
     unit: Unit
     path: seq[Vec2i]
     index: int
     time: float32
+    onComplete: proc(unit: Unit)
+    moveType: BattleMoveType
 
   Battle = ref object of RootObj
     pos: Vec2i
@@ -293,6 +305,8 @@ type
     units: seq[Unit]
     moves: seq[BattleMove]
     pauseTimer: float32
+    knownTraps: seq[Vec2i]
+    unitsToDeploy: seq[Unit]
 
   Army = ref object of RootObj
     pos: Vec2i
@@ -344,7 +358,7 @@ proc hash*(x: Vec2i): Hash =
   h = h !& x.y
   result = !$h
 
-iterator neighbors*(self: Battle, start: Vec2i, node: Vec2i): Vec2i =
+iterator neighbors*(self: Battle, unit: Unit, node: Vec2i, reality = true): Vec2i =
   for x in -1..1:
     for y in -1..1:
       if x == 0 or y == 0:
@@ -353,13 +367,7 @@ iterator neighbors*(self: Battle, start: Vec2i, node: Vec2i): Vec2i =
         if n.x >= 0 and n.x < width and n.y >= 0 and n.y < height:
           let t = map[n.y * width + n.x]
           if t != 0 and t != 4:
-            var occupied = false
-            if node != start:
-              for u in units:
-                if u.battlePos == n:
-                  occupied = true
-                  break
-            if not occupied:
+            if not self.impassable(unit, n, reality):
               yield n
 
 proc heuristic*(self: Battle, a,b: Vec2i): int =
@@ -370,28 +378,30 @@ iterator items*(self: Battle): Vec2i =
     for x in 0..<width:
       yield vec2i(x,y)
 
-proc cost*(self: Battle, a,b: Vec2i, mover: Unit = nil): int =
+proc cost*(self: Battle, a,b: Vec2i, mover: Unit = nil, reality = true): int =
   let t = map[b.y * width + b.x]
   for u in units:
     if u.team != mover.team and u.battlePos == b:
+      if reality == false and u.hidden:
+        continue
       return 999
   if mover != nil and mover.kind == Cavalry:
     result = case t:
-      of 0,1: 4 # dirt
+      of 0,1: 2 # dirt
       of 2: 999 # rock
-      of 3: 20 # forest
+      of 3: 4 # forest
       of 4: 999 # water
       of 5: 1 # road
       of 9: 4
       else: 999
   else:
     result = case t:
-      of 0,1: 4 # dirt
-      of 2: 19 # rock
-      of 3: 9 # forest
+      of 0,1: 2 # dirt
+      of 2: 6 # rock
+      of 3: 3 # forest
       of 4: 999 # water
       of 5: 1 # road
-      of 9: 4
+      of 9: 2
       else: 999
 
 proc move*(self: Unit, to: Site) =
@@ -1477,9 +1487,24 @@ proc newUnit(kind: UnitKind, site: Site): Unit =
   result.age = 0
   result.usedAbility = false
   result.moveDist = case kind:
-    of Cavalry: 40
-    of Shaman: 15
-    else: 20
+    of Cavalry: 8
+    of Shaman: 5
+    else: 6
+  result.attackMaxDist = case kind:
+    of Cavalry: 2
+    of Shaman: 3
+    else: 1
+  result.attackMinDist = case kind:
+    of Cavalry: 1
+    of Shaman: 2
+    else: 1
+  result.attackIndirect = case kind:
+    of Shaman: true
+    else: false
+  result.battleMovesInit = 1
+  result.battleAttacksInit = case kind:
+    of Soldier,Shaman,Cavalry: 1
+    else: 0
 
 proc dialogYesNo(text: string, onYes: proc() = nil, onNo: proc() = nil) =
   areYouSure = true
@@ -1583,36 +1608,68 @@ proc `<`*(a,b: (Vec2i,int)): bool =
 proc isTrap(self: Battle, unit: Unit, pos: Vec2i, reality = true): bool =
   var count = 0
   for u in units:
-    if u.battleAttacked == false and u.team != unit.team and manhattanDist(pos, u.battlePos) == 1:
+    if u.team != unit.team and manhattanDist(pos, u.battlePos) == 1 and u.battleAttacks > 0:
       if reality or u.hidden == false:
         count += 1
         if count == 2:
           return true
   return false
 
+proc canAttack(self: Battle, unit: Unit, pos: Vec2i): bool =
+  return self.canAttackFrom(unit, unit.battlePos, pos)
+
+proc canAttackFrom(self: Battle, unit: Unit, battlePos: Vec2i, pos: Vec2i): bool =
+  if pos.x == battlePos.x or pos.y == battlePos.y:
+    let d = manhattanDist(battlePos, pos)
+    if d >= unit.attackMinDist and d <= unit.attackMaxDist:
+      if not unit.attackIndirect:
+        # check if there's a clear path
+        if pos.x == battlePos.x:
+          for y in countupordown(battlePos.y,pos.y):
+            if self.occupied(unit, vec2i(pos.x, y), false):
+              return false
+        elif pos.y == battlePos.y:
+          for x in countupordown(battlePos.x,pos.x):
+            if self.occupied(unit, vec2i(x, pos.y), false):
+              return false
+      return true
+  return false
+
 proc drawBattle(self: Battle) =
   let cx = screenWidth div 2 - width * 8
   let cy = screenHeight div 2 - height * 8
 
+  var (mx,my) = mouse()
+  mx -= cx
+  my -= cy
+  let mtx = mx div 16
+  let mty = my div 16
+  let mpos = vec2i(mtx,mty)
+
+  # draw terrain
   setSpritesheet(3)
   for y in 0..<height:
     for x in 0..<width:
       spr(map[y * width + x], cx + x * 16, cy + y * 16)
 
   setSpritesheet(0)
+  for trap in knownTraps:
+    spr(26, cx + trap.x * 16 + 8 - 4, cy + trap.y * 16 + 8 - 4)
+
+  # draw units
   for u in units:
     u.draw(cx + u.battlePos.x * 16 + 8 - 4, cy + u.battlePos.y * 16 + 8 - 4)
     if u.team == 1 and turnPhase == phaseTurn:
-      if not u.battleMoved:
+      if u.battleMoves > 0:
         setColor(8)
         circfill(u.pos.x + 1, u.pos.y + 8, 1)
-      if not u.battleAttacked:
+      if u.battleAttacks > 0:
         setColor(27)
         circfill(u.pos.x + 7, u.pos.y + 8, 1)
 
   if hoverUnit != nil and hoverUnit.team != 1:
     let moves = calculatePossibleMoveAttacks(hoverUnit, false)
-    # show their next move
+    # show enemy unit's possible moves
     setColor(27)
     if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
     for move in moves:
@@ -1624,15 +1681,17 @@ proc drawBattle(self: Battle) =
         rrect(cx + x * 16 + 2, cy + y * 16 + 2, cx + x * 16 + 13, cy + y * 16 + 13)
     ditherPattern()
 
-  var (mx,my) = mouse()
-  mx -= cx
-  my -= cy
-  let mtx = mx div 16
-  let mty = my div 16
-  let mpos = vec2i(mtx,mty)
+  if unitsToDeploy.len > 0:
+    if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
+    setColor(21)
+    for y in (height div 4 * 3)..<height:
+      for x in 0..<width:
+        if not occupied(unitsToDeploy[unitsToDeploy.high], vec2i(x,y), true):
+          rrect(cx + x * 16 + 1, cy + y * 16 + 1, cx + x * 16 + 14, cy + y * 16 + 14)
+    ditherPattern()
 
   if selectedUnit != nil:
-    if not selectedUnit.battleMoved:
+    if selectedUnit.battleMoves > 0:
       for y in 0..<height:
         for x in 0..<width:
           let pos = vec2i(x,y)
@@ -1651,17 +1710,24 @@ proc drawBattle(self: Battle) =
         # draw path to tile under mouse
         var distprev = selectedUnitMoves[mpos]
         var pos = mpos
+        if distprev[0] > 999:
+          return
+        if distprev[0] > selectedUnit.moveDist:
+          setColor(27)
+        else:
+          setColor(21)
+        printc($distprev[0], cx + pos.x * 16 + 8, cy + pos.y * 16 - 8)
         while distprev[1][0]:
           let prev = distprev[1][1]
           line(cx + prev.x * 16 + 8, cy + prev.y * 16 + 8, cx + pos.x * 16 + 8, cy + pos.y * 16 + 8)
           distprev = selectedUnitMoves[prev]
           pos = prev
 
-    if not selectedUnit.battleAttacked:
+    if selectedUnit.battleAttacks > 0:
       setColor(27)
       for u in units:
-        if u.team != selectedUnit.team:
-          if manhattanDist(u.battlePos, selectedUnit.battlePos) == 1:
+        if u.team != selectedUnit.team and not u.hidden:
+          if selectedUnit.canAttack(u.battlePos):
             if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
             let x = u.battlePos.x
             let y = u.battlePos.y
@@ -2178,9 +2244,10 @@ proc startTurn() =
             ab.action(site)
 
   for battle in battles:
+    battle.knownTraps = @[]
     for u in battle.units:
-      u.battleMoved = false
-      u.battleAttacked = false
+      u.battleMoves = u.battleMovesInit
+      u.battleAttacks = u.battleAttacksInit
 
   if currentDestiny != nil:
     # apply old destiny and discard
@@ -2264,6 +2331,27 @@ proc endTurn() =
   selectedSite = nil
 
   undoStack = @[]
+
+  for battle in battles:
+    battle.knownTraps = @[]
+    for u in battle.units:
+      u.battleMoves = u.battleMovesInit
+      u.battleAttacks = u.battleAttacksInit
+    if turn mod 2 == 0:
+      for y in 0..<battle.height:
+        for x in 0..<battle.width:
+          if battle.mget(vec2i(x,y)) == 9:
+            var blocked = false
+            for u in battle.units:
+              if u.battlePos == vec2i(x,y):
+                blocked = true
+                break
+            if not blocked:
+              var u = newUnit(Soldier,nil)
+              u.team = 2
+              u.battlePos = vec2i(x,y)
+              battle.units.add(u)
+
 
   if currentDestiny != nil:
     let ds = currentDestiny.settings.DestinyCardSettings
@@ -2398,36 +2486,45 @@ proc newTown(name: string, size: int, pos: Vec2i): Town =
   town.sites = newSeq[Site](town.width * town.height)
   return town
 
-proc newBattle(x,y: int): Battle =
+proc newBattle(x,y: int, w,h: int): Battle =
   result = new(Battle)
   result.pos = vec2i(x,y)
   result.age = 0
-  result.width = 8
-  result.height = 8
+  result.width = w
+  result.height = h
   result.map = newSeq[int](result.width * result.height)
   for y in 0..<result.height:
     for x in 0..<result.width:
-        result.map[y * result.width + x] = rnd([1,3,1,1,3,1,1,1,3,3,2,1,3,1,5,1,3,2])
-  result.map[(result.height div 2 - rnd(1)) * result.width + (result.width div 2 - rnd(1))] = 9
+        result.map[y * result.width + x] = rnd([1,3,1,1,3,1,1,1,3,3,2,1,3,1,5,1,3,2,3,3,3,3,3,3])
+  result.map[(1 + rnd(3)) * result.width + (result.width div 2 - rndbi(3))] = 9
 
   # place 1 water tile around the middle
   let wx = rnd(result.width-1)
-  let wy = result.height div 2 - rnd(1)
+  let wy = result.height div 2 - rndbi(3)
   result.map[wy * result.width + wx] = 4
 
   result.units = @[]
+  result.unitsToDeploy = @[]
 
   for i in 0..<result.width:
     var u = newUnit(if i == result.width div 2: Shaman else: Soldier, nil)
-    u.battlePos = vec2i(i,result.height-1)
+    #u.battlePos = vec2i(i,result.height-1)
     u.team = 1
-    result.units.add(u)
+    result.unitsToDeploy.add(u)
+
+  for i in 0..<result.width div 2:
+    var u = newUnit(Follower, nil)
+    u.team = 1
+    result.unitsToDeploy.add(u)
 
   for i in 0..<result.width:
-    var u = newUnit(rnd([Soldier,Soldier,Soldier,Cavalry]), nil)
-    u.battlePos = vec2i(i,0)
-    u.team = 2
-    result.units.add(u)
+    for y in 0..1:
+      var u = newUnit(rnd([Soldier,Soldier,Soldier,Cavalry]), nil)
+      u.battlePos = vec2i(i,y)
+      u.team = 2
+      result.units.add(u)
+
+  result.revealHidden()
 
 proc newSite(town: Town, siteSettings: SiteSettings, x, y: int): Site {.discardable.} =
   var site = new(Site)
@@ -2457,7 +2554,7 @@ proc newGame() =
 
   battles = @[]
 
-  currentBattle = newBattle(2,2)
+  currentBattle = newBattle(2,2,12,12)
 
   battles.add(currentBattle)
 
@@ -3350,11 +3447,11 @@ proc mget(self: Battle, pos: Vec2i): int =
     return 0
   return map[pos.y * width + pos.x]
 
-proc move(self: Battle, unit: Unit, dest: Vec2i) =
+proc move(self: Battle, unit: Unit, dest: Vec2i, moveType: BattleMoveType, delay: float32, onComplete: proc(unit: Unit) = nil) =
   if manhattanDist(unit.battlePos, dest) == 1:
-    moves.add(BattleMove(unit: unit, path: @[dest]))
+    moves.add(BattleMove(unit: unit, path: @[dest], moveType: moveType, onComplete: onComplete))
   else:
-    let pathinfo = dijkstra(unit.battlePos, unit.moveDist, unit)
+    let pathinfo = self.dijkstra(unit.battlePos, unit.moveDist, unit, false)
     var path: seq[Vec2i]
     var pos = dest
     path.add(pos)
@@ -3365,34 +3462,37 @@ proc move(self: Battle, unit: Unit, dest: Vec2i) =
       pos = prev
       path.add(pos)
     path.reverse()
-    moves.add(BattleMove(unit: unit, path: path))
+    moves.add(BattleMove(unit: unit, path: path, moveType: moveType, onComplete: onComplete))
 
 proc attack(self: Battle, attacker, defender: Unit) =
-  let dir = defender.battlePos - attacker.battlePos
+  var dir = defender.battlePos - attacker.battlePos
+  let direct = not attacker.attackIndirect
+  dir.x = clamp(dir.x, -1, 1)
+  dir.y = clamp(dir.y, -1, 1)
   echo "attacker: ", attacker.battlePos, " ", attacker.team, "  ", attacker.kind, " dir: ", dir
   echo "defender: ", defender.battlePos, " ", defender.team, "  ", defender.kind, " hp: ", defender.hp
   # check if area behind defender is free
-  if not occupied(defender, defender.battlePos + dir, true):
-    echo "empty space at ", defender.battlePos + dir
+  if not occupied(defender, defender.battlePos + dir, true) and self.mget(defender.battlePos + dir) != 2:
+    # if it's free, push defender back
     let oldPos = defender.battlePos
-    move(defender, defender.battlePos + dir)
-    move(attacker, oldPos)
-    # check if new position is adjacent to another attacker team unit (but not the attacker)
-    for u in units:
-      if u.team == attacker.team and u != attacker:
-        if manhattanDist(u.battlePos, defender.battlePos) == 1:
-          echo "pincered, dealing damage"
-          defender.hp -= 1
-          break
+    if direct:
+      # if it's a direct attack, follow them
+      move(attacker, oldPos, bmAttack, 0)
+    move(defender, defender.battlePos + dir, bmRetreat, 0.5)
   else:
-    echo "can't retreat, dealing damage"
-    defender.hp -= 1
-    if not occupied(attacker, defender.battlePos, true):
-      echo "moving into empty space"
-      move(attacker, defender.battlePos)
-  attacker.battleAttacked = true
-  attacker.battleMoved = true
-  pauseTimer = 0.5
+    if direct:
+      move(attacker, defender.battlePos, bmAttack, 0) do(unit: Unit):
+        newParticleText(defender.pos, vec2f(0,-10), 1.0, "Rout!", 27, 27)
+        defender.hp -= 1
+        pauseTimer = max(pauseTimer, 2.0)
+    else:
+      pauseTimer = max(pauseTimer, 2.0)
+      newParticleText(defender.pos, vec2f(0,-10), 1.0, "Rout!", 27, 27)
+      defender.hp -= 1
+
+  attacker.battleAttacks -= 1
+  if direct:
+    attacker.battleMoves -= 1
 
 proc battleUpdateCommon(self: Battle, dt: float32) =
   for u in units:
@@ -3404,32 +3504,68 @@ proc battleUpdateCommon(self: Battle, dt: float32) =
     pauseTimer -= dt
     return
 
+  var movesInProgress = moves.len > 0
   for move in moves.mitems:
     if move.time > 0:
       move.time -= dt
     else:
-      # check if new space is adjacent to two enemies
+      var cameFrom = move.unit.battlePos
       move.unit.battlePos = move.path[move.index]
       move.time = 0.1
-
-      # check for traps
-      if isTrap(move.unit, move.unit.battlePos, true):
-        echo "moved into trap, dealing damage ", move.unit.battlePos
-        move.unit.hp -= 1
-        move.index = move.path.high
-        pauseTimer = 0.5
-
       move.index += 1
-      if move.index == move.path.len:
-        pauseTimer = 0.5
+      checkIfHidden(move.unit)
+      # if moving into occupied space, move back to previous space and stop
+      if move.moveType != bmAttack:
+        for u in units:
+          if u.team != move.unit.team and u.battlePos == move.unit.battlePos:
+            newParticleText(move.unit.pos, vec2f(0,-10), 1.0, "Surprise!", 27, 27)
+            move.unit.battleAttacks -= 1
+            move.path = @[cameFrom]
+            move.index = 0
+            move.time = 0.1
+            pauseTimer = max(pauseTimer, 1.0)
+            break
+      if move.moveType == bmRetreat:
+        let moveDir = move.unit.battlePos - cameFrom
+        # if adjacent to enemy during retreat, take damage
+        for u in units:
+          if u.team != move.unit.team and u.battleAttacksInit > 0 and manhattanDist(u.battlePos, move.unit.battlePos) == 1:
+            let unitDir = move.unit.battlePos - u.battlePos
+            if moveDir != unitDir:
+              newParticleText(move.unit.pos, vec2f(0,-10), 1.0, "Ambushed!", 27, 27)
+              move.unit.hp -= 1
+              pauseTimer = max(pauseTimer, 2.0)
+              break
 
-    #for u in units:
-    #  if isTrap(u, u.battlePos, true):
-    #    u.hp -= 1
-  revealHidden()
+  # for anyone that completed a move, check if they walked into a trap, if so take damage
+  var moveCompleted = false
+  for move in moves:
+    if move.index >= move.path.len and move.time <= 0:
+      moveCompleted = true
+      if move.onComplete != nil:
+        move.onComplete(move.unit)
+      pauseTimer = max(pauseTimer, 0.2)
+      if isTrap(move.unit, move.unit.battlePos, true):
+        newParticleText(move.unit.pos, vec2f(0,-10), 1.0, "Ambushed!", 27, 27)
+        if (turnPhase == phaseTurn and move.unit.team == 1) or (turnPhase == phaseEndOfTurn and move.unit.team != 1):
+          knownTraps.add(move.unit.battlePos)
+        move.unit.hp -= 1
+        pauseTimer = max(pauseTimer, 2.0)
 
-  moves.keepItIf(it.index < it.path.len)
+  if moveCompleted:
+    for u in units:
+      if u.hp <= 0:
+        newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
+    units.keepItIf(it.hp > 0)
 
+    moves.keepItIf(it.index < it.path.len and it.time <= 0)
+
+    revealHidden()
+
+    for i in 0..<units.len:
+      for j in i+1..<units.len:
+        if units[i].battlePos == units[j].battlePos:
+          echo "problem! two units on same space!", units[i].battlePos
 
 
 proc battleUpdate(self: Battle, dt: float32) =
@@ -3441,64 +3577,81 @@ proc battleUpdate(self: Battle, dt: float32) =
   let cx = screenWidth div 2 - width * 8
   let cy = screenHeight div 2 - height * 8
   var (mx,my) = mouse()
+
+  let tx = (mx - cx) div 16
+  let ty = (my - cy) div 16
+
+  let tpos = vec2i(tx,ty)
+
+  if unitsToDeploy.len > 0:
+    if mousebtnp(0):
+        if not (tx < 0 or ty < 0 or tx >= width or ty >= height):
+          if ty >= height div 4 * 3:
+            for i,u in units:
+              if u.battlePos == tpos:
+                unitsToDeploy.add(u)
+                units.delete(i)
+                return
+            var unit = unitsToDeploy.pop()
+            unit.battlePos = tpos
+            unit.battleMoves = 0
+            unit.battleAttacks = 0
+            units.add(unit)
+            return
+
   hoverUnit = nil
 
   if selectedUnit notin units:
     selectedUnit = nil
+  if hoverUnit notin units:
+    hoverUnit = nil
 
-  var playerUnits = 0
-  var enemyUnits = 0
   for u in units:
-    if u.team == 1:
-      playerUnits += 1
-    else:
-      enemyUnits += 1
-
     if mx >= u.pos.x - 1 and mx <= u.pos.x + 7 and my >= u.pos.y - 1 and my <= u.pos.y + 7:
       if u.hidden == false or u.team == 1:
         hoverUnit = u
 
-  if playerUnits == 0:
-    currentBattle = nil
-    echo "BATTLE LOST"
-    return
-  elif enemyUnits == 0:
-    echo "BATTLE WON"
-    currentBattle = nil
-    return
-
   if mousebtnp(0):
     if hoverUnit != nil and hoverUnit.team == 1:
       selectedUnit = hoverUnit
-      selectedUnitMoves = dijkstra(selectedUnit.battlePos, selectedUnit.moveDist, selectedUnit)
+      selectedUnitMoves = self.dijkstra(selectedUnit.battlePos, 99999, selectedUnit, false)
     else:
       if selectedUnit != nil:
         # check if this is a movable area
-        let tx = (mx - cx) div 16
-        let ty = (my - cy) div 16
-        let tpos = vec2i(tx,ty)
-        var occupied = false
-        var occupiedBy: Unit = nil
+
+        if tx < 0 or ty < 0 or tx >= width or ty >= height:
+          selectedUnit = nil
+          return
+
         for u in units:
-          if u.battlePos == tpos:
-            occupied = true
-            occupiedBy = u
-            break
-        if not occupied and selectedUnit.battleMoved == false:
+          if u.battlePos == tpos and u.team == 1:
+            selectedUnit = u
+            selectedUnitMoves = self.dijkstra(selectedUnit.battlePos, 99999, selectedUnit, false)
+            return
+
+        var isOccupied = self.occupied(selectedUnit, tpos, false)
+        var occupiedBy: Unit = nil
+        if isOccupied:
+          for u in units:
+            if u.battlePos == tpos:
+              occupiedBy = u
+              break
+
+        if isOccupied and occupiedBy.team != 1 and selectedUnit.battleAttacks > 0:
+          # enemy, attack if in range
+          if selectedUnit.canAttack(occupiedBy.battlePos):
+            attack(selectedUnit, occupiedBy)
+
+        elif selectedUnit.battleMoves > 0:
           if selectedUnitMoves.hasKey(tpos):
             let distprev = selectedUnitMoves[tpos]
             let dist = distprev[0]
             let prev = distprev[1][1]
             if dist <= selectedUnit.moveDist:
-              move(selectedUnit, tpos)
-              selectedUnit.battleMoved = true
-        elif occupiedBy != nil and occupiedBy.team != 1 and selectedUnit.battleAttacked == false:
-          # enemy, attack if in range
-          if manhattanDist(selectedUnit.battlePos, occupiedBy.battlePos) == 1:
-            attack(selectedUnit, occupiedBy)
+              move(selectedUnit, tpos, bmMove, 0)
+              selectedUnit.battleMoves -= 1
         else:
           selectedUnit = nil
-          echo "selected nothing"
 
 proc manhattanDist(a, b: Vec2i): int =
   return abs(a.x - b.x) + abs(a.y - b.y)
@@ -3523,7 +3676,7 @@ proc calculatePossibleMoveAttacks(self: Battle, u: Unit, reality = true): seq[(V
   var attacks: seq[(Vec2i,bool)]
   for pos in self:
     for move in moves:
-      if manhattanDist(move[0], pos) == 1:
+      if u.canAttackFrom(move[0], pos):
         if (pos,false) notin moves:
           attacks.add((pos,true))
   moves.add(attacks)
@@ -3541,42 +3694,111 @@ proc occupied(self: Battle, unit: Unit, pos: Vec2i, reality = true): bool =
       return true
   return false
 
-proc calculateMove(self: Battle, u: Unit): seq[Vec2i] =
-  # find nearest enemy
-  var nearestEnemy: Unit = nil
-  var nearestTargetPos: Vec2i
-  var nearestDist: int = 99999
-  let costs = dijkstra(u.battlePos, 99999, u)
-  for u2 in units:
-    if u2.team != u.team:
-      if mget(u2.battlePos) != 3 or manhattanDist(u2.battlePos, u.battlePos) < 2:
-        for n in neighbors(u2.battlePos, u2.battlePos):
-          if costs[n][0] < nearestDist and not occupied(u, n, false) and not isTrap(u, n, false):
-            nearestDist = costs[n][0]
-            nearestEnemy = u2
-            nearestTargetPos = n
+proc impassable(self: Battle, unit: Unit, pos: Vec2i, reality = true): bool =
+  if pos.x < 0 or pos.y < 0 or pos.x >= width or pos.y >= height:
+    return true
+  if mget(pos) == 4:
+    return true
+  for u in units:
+    if u.team != unit.team and u.battlePos == pos and u.hp > 0:
+      if not reality and u.hidden and u.team != unit.team:
+        continue
+      return true
+  return false
 
-  var endPos = u.battlePos
-  if nearestEnemy != nil:
-    # follow the path back from them to the furthest one we can move to
-    var pos = nearestTargetPos
-    var dist = costs[pos][0]
-    while dist > u.moveDist:
-      if costs[pos][1][0]:
-        pos = costs[pos][1][1]
-        dist = costs[pos][0]
-      else:
+proc scorePosition(self: Battle, u: Unit, pos: Vec2i, target: Unit = nil): float32 =
+  result = 0
+  if self.isTrap(u, pos, false):
+    result -= 100.0
+
+  for trap in knownTraps:
+    if trap == pos:
+      result -= 100.0
+
+  let t = self.mget(pos)
+  if t == 3: # forest
+    result += 15.0
+  elif t == 2: # rock
+    result += 10.0
+
+  if pos.x == 0 or pos.x == width - 1 or pos.y == 0 or pos.y == height - 1:
+    result -= 5.0
+
+  for n in self.neighbors(u, pos, false):
+    if self.mget(n) == 3: # adjacent to forest, slight risk
+      result -= 1.0
+    if self.mget(n) == 2: # to rock, big risk
+      result -= 5.0
+    if self.mget(n) == 4: # to water, big risk
+      result -= 5.0
+    for u2 in units:
+      if u2.battlePos == n and u2.team == u.team:
+        result -= 2.0
         break
-    if dist <= u.moveDist and occupied(u, pos, false) == false:
-      endPos = pos
 
-  var pos = endPos
-  result.add(pos)
-  while true:
-    if pos == u.battlePos or costs[pos][1][0] == false:
-      break
-    pos = costs[pos][1][1]
-    result.add(pos)
+  if target != nil:
+    # would pushing this target kill them?
+    var dir = u.battlePos - target.battlePos
+    dir.x = clamp(dir.x, -1, 1)
+    dir.y = clamp(dir.y, -1, 1)
+
+    let posAfterAttack = target.battlePos + dir
+    if self.mget(posAfterAttack) in [2,4]:
+      result += 20.0
+    else:
+      for u2 in units:
+        if u2.battlePos == posAfterAttack and u2.team == u.team or not u2.hidden:
+          result += 20.0
+          break
+        elif u2.team == u.team:
+          for n in self.neighbors(target, posAfterAttack, false):
+            if n == posAfterAttack:
+              result += 30.0
+              break
+
+    # would pushing them push them into an ambush?
+
+    # TODO take into account whether we'd end up in a bad position if it's a direct attack
+
+  result += rndbi(5.0)
+
+proc calculateMove(self: Battle, u: Unit): Vec2i =
+  # TODO find all places we can move to that we can attack from
+  # if no possible attacks, find places on path to enemy
+  # TODO score these based on things like, in-hiding, potential for traps
+
+  var possibleAttackOrigins: seq[tuple[pos: Vec2i, unit: Unit, score: float32]]
+  let possibleMoves = self.calculatePossibleMoves(u, false)
+  for ma in possibleMoves:
+    # check if there's anything we can attack here
+    for u2 in units:
+      if u2.team != u.team and not u2.hidden:
+        if self.canAttackFrom(u, ma[0], u2.battlePos):
+          possibleAttackOrigins.add((ma[0], u2, 0.0f))
+
+  for ao in possibleAttackOrigins.mitems:
+    ao.score = self.scorePosition(u, ao.pos, ao.unit)
+
+  if possibleAttackOrigins.len == 0:
+    var bestPos = u.battlePos
+    var bestScore: float32 = float32.low
+    for ma in possibleMoves:
+      let score = self.scorePosition(u, ma[0])
+      if score > bestScore:
+        bestScore = score
+        bestPos = ma[0]
+    return bestPos
+
+  else:
+    var bestPos = u.battlePos
+    var bestScore = float32.low
+    for ao in possibleAttackOrigins:
+      if ao.score > bestScore:
+        bestScore = ao.score
+        bestPos = ao.pos
+    return bestPos
+
+  return u.battlePos
 
 iterator countupordown[T](a,b: T): T =
   if a < b:
@@ -3586,38 +3808,51 @@ iterator countupordown[T](a,b: T): T =
     for i in countdown(a-1, b+1):
       yield i
 
+iterator countupordownInclusive[T](a,b: T): T =
+  if a < b:
+    for i in countup(a, b):
+      yield i
+  else:
+    for i in countdown(a, b):
+      yield i
+
+proc checkIfHidden(self: Battle, u: Unit) =
+  if mget(u.battlePos) == 3:
+    # check if adjacent to enemy
+    u.hidden = true
+    for u2 in units:
+      let t = mget(u2.battlePos)
+      if u2.team != u.team and manhattanDist(u.battlePos, u2.battlePos) <= (if t == 2: 2 else: 1):
+        u.hidden = false
+  else:
+    u.hidden = false
+    ## check LoS
+    #u.hidden = true
+    #for u2 in units:
+    #  if u2.team != u.team:
+    #    let a = u2.battlePos
+    #    let b = u.battlePos
+    #    if manhattanDist(a,b) == 1:
+    #      u.hidden = false
+    #    else:
+    #      var blocked = false
+    #      if a.x == b.x or a.y == b.y: # los travels along axes
+    #        if a.y == b.y:
+    #          for x in countupordown(a.x,b.x):
+    #            if self.mget(vec2i(x, a.y)) == 2:
+    #              blocked = true
+    #              break
+    #        elif a.x == b.x:
+    #          for y in countupordown(a.y,b.y):
+    #            if mget(vec2i(a.x, y)) == 2:
+    #              blocked = true
+    #              break
+    #        if not blocked:
+    #          u.hidden = false
+
 proc revealHidden(self: Battle) =
   for u in units:
-    if mget(u.battlePos) == 3:
-      # check if adjacent to enemy
-      u.hidden = true
-      for u2 in units:
-        if u2.team != u.team and manhattanDist(u.battlePos, u2.battlePos) == 1:
-          u.hidden = false
-    else:
-      # check LoS
-      u.hidden = true
-      for u2 in units:
-        if u2.team != u.team:
-          let a = u2.battlePos
-          let b = u.battlePos
-          if manhattanDist(a,b) == 1:
-            u.hidden = false
-          else:
-            var blocked = false
-            if a.x == b.x or a.y == b.y: # los travels along axes
-              if a.y == b.y:
-                for x in countupordown(a.x,b.x):
-                  if self.mget(vec2i(x, a.y)) == 2:
-                    blocked = true
-                    break
-              elif a.x == b.x:
-                for y in countupordown(a.y,b.y):
-                  if mget(vec2i(a.x, y)) == 2:
-                    blocked = true
-                    break
-              if not blocked:
-                u.hidden = false
+    u.checkIfHidden()
 
 proc battleEndTurn(self: Battle, dt: float32): bool =
   battleUpdateCommon(dt)
@@ -3625,23 +3860,42 @@ proc battleEndTurn(self: Battle, dt: float32): bool =
   if moves.len > 0:
     return true
 
-  var moved = false
   for u in units:
     if u.team != 1:
-      if not u.battleMoved:
-        var moves = calculateMove(u)
-        if moves.len > 0:
-          move(u, moves[0])
-          u.battleMoved = true
+      if u.battleMoves > 0:
+        var bestMove = calculateMove(u)
+        if bestMove != u.battlePos:
+          move(u, bestMove, bmMove, 0)
+          u.battleMoves -= 1
           return true
 
-      if not u.battleAttacked:
-        # check if they can attack
+      if u.battleAttacks > 0:
+        var bestTarget: Unit
+        var bestScore = float32.low
         for u2 in units:
           if u2.team != u.team:
-            if manhattanDist(u.battlePos, u2.battlePos) == 1:
-              attack(u, u2)
-              return true
+            if u.canAttack(u2.battlePos):
+              let score = self.scorePosition(u, u.battlePos, u2)
+              if score > bestScore:
+                bestScore = score
+                bestTarget = u2
+        if bestTarget != nil:
+          attack(u, bestTarget)
+          return true
+
+  var playerUnits = 0
+  var enemyUnits = 0
+
+  for u in units:
+    if u.team == 1:
+      playerUnits += 1
+    else:
+      enemyUnits += 1
+
+  if playerUnits == 0:
+    return false
+  elif enemyUnits == 0:
+    return false
 
   return false
 
@@ -3873,7 +4127,7 @@ proc gameDraw() =
       spr(40, mx - 1, my - 1)
     elif G.activeHoverElement != 0:
       spr(39, mx - 1, my - 1)
-    elif inputMode == Relocate or inputMode == PlaceUnit:
+    elif inputMode == Relocate or inputMode == PlaceUnit or currentBattle != nil and currentBattle.unitsToDeploy.len > 0:
       spr(if hoverUnit == nil: 38 else: 41, mx - 4, my - 7)
     elif inputMode == SelectUnit:
       spr(33, mx - 4, my - 4)
@@ -3884,16 +4138,29 @@ proc gameDraw() =
     # units
     var x = 0
     var y = 0
-    for i in countdown(placingUnits.high,0):
-      let u = placingUnits[i]
-      if i == placingUnits.high and hoverUnit == nil: # show first unit under cursor
-        u.draw(mx - 4, my)
-      else:
-        u.draw(mx + 7 + x, my - 7 + y)
-        x += 6
-        if x >= 6 * 5:
-          x = 0
-          y += 8
+    if currentBattle != nil:
+      for i in countdown(currentBattle.unitsToDeploy.high,0):
+        let u = currentBattle.unitsToDeploy[i]
+        if i == currentBattle.unitsToDeploy.high: # show first unit under cursor
+          u.draw(mx - 4, my)
+        else:
+          u.draw(mx + 7 + x, my - 7 + y)
+          x += 6
+          if x >= 6 * 5:
+            x = 0
+            y += 8
+
+    else:
+      for i in countdown(placingUnits.high,0):
+        let u = placingUnits[i]
+        if i == placingUnits.high and hoverUnit == nil: # show first unit under cursor
+          u.draw(mx - 4, my)
+        else:
+          u.draw(mx + 7 + x, my - 7 + y)
+          x += 6
+          if x >= 6 * 5:
+            x = 0
+            y += 8
 
 
 proc gameDrawMenu() =
@@ -4014,8 +4281,8 @@ proc gameDrawGame() =
       spr(f, pos.x, pos.y)
 
     if not p.hasDest:
-      p.pos += p.vel
-    p.ttl -= 1/30
+      p.pos += p.vel * 1.0/60.0
+    p.ttl -= 1.0/60.0
 
   particles.keepItIf(it.ttl > 0)
 

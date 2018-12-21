@@ -1,6 +1,6 @@
 import heapqueue, tables, hashes, math
 
-proc dijkstra*[G,N,D,M](graph: G, start: N, maxCost: D, mover: M): Table[N,tuple[dist: D, prev: (bool,N)]] =
+proc dijkstra*[G,N,D,M](graph: G, start: N, maxCost: D, mover: M, reality = true): Table[N,tuple[dist: D, prev: (bool,N)]] =
 
   var distprev = initTable[N,tuple[dist: D, prev: (bool,N)]]()
 
@@ -19,7 +19,7 @@ proc dijkstra*[G,N,D,M](graph: G, start: N, maxCost: D, mover: M): Table[N,tuple
   while Q.len > 0:
     let ud = Q.pop()
     let u = ud[0]
-    for v in graph.neighbors(start, u):
+    for v in graph.neighbors(mover, u, reality):
       var found = false
       for i in 0..<Q.len:
         if Q[i][0] == v:
@@ -27,8 +27,8 @@ proc dijkstra*[G,N,D,M](graph: G, start: N, maxCost: D, mover: M): Table[N,tuple
           break
       if not found:
         continue
-      let alt = distprev[u].dist + graph.cost(u,v,mover)
-      if alt < distprev[v].dist and alt < maxCost:
+      let alt = distprev[u].dist + graph.cost(u,v,mover,reality)
+      if alt < distprev[v].dist and alt <= maxCost:
         distprev[v].dist = alt
         distprev[v].prev = (true,u)
         for i in 0..<Q.len:
