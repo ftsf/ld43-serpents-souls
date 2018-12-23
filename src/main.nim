@@ -309,9 +309,12 @@ type
     moves: seq[BattleMove]
     pauseTimer: float32
     knownTraps: seq[Vec2i]
+    knownEnterForests: seq[(Vec2i,int)]
+    knownExitForests: seq[(Vec2i,int)]
     unitsToDeploy: seq[Unit]
     completed: bool
     victor: int
+    stealthMode: bool
 
   Army = ref object of RootObj
     pos: Vec2i
@@ -371,6 +374,8 @@ iterator neighbors*(self: Battle, unit: Unit, node: Vec2i, reality = true): Vec2
         let n = node + offset
         if n.x >= 0 and n.x < width and n.y >= 0 and n.y < height:
           let t = map[n.y * width + n.x]
+          if teamTurn == 1 and stealthMode and t != 3:
+            continue
           if t != 0 and t != 4:
             if not self.impassable(unit, n, reality):
               yield n
@@ -599,6 +604,7 @@ var turnPhase: TurnPhase
 var phaseTimer: float32
 var saveExists: bool
 var battlesWaging: bool
+var skirmishMode = false
 
 var pan: Vec2i
 
@@ -620,6 +626,7 @@ var inputMode: InputKind
 var selectedUnit: Unit
 var selectedUnitMoves: Table[Vec2i,(int, (bool, Vec2i))]
 var selectedUnitAttacks: seq[Vec2i]
+var selectedEnemy: Unit
 var hoverUnit: Unit
 var lastClickPos: Vec2i
 var lastClickTime: float32
@@ -1569,7 +1576,7 @@ proc draw(self: Unit, x,y: int) =
   let x = pos.x
   let y = pos.y
 
-  if not isVisible(1):
+  if currentBattle != nil and not currentBattle.completed and not isVisible(1):
     return
 
   if currentBattle != nil and hidden:
@@ -1629,7 +1636,7 @@ proc `<`*(a,b: (Vec2i,int)): bool =
 proc isTrap(self: Battle, unit: Unit, pos: Vec2i, reality = true): bool =
   var count = 0
   for u in units:
-    if u.hp > 0 and u.team != unit.team and manhattanDist(pos, u.battlePos) == 1 and u.battleAttacks > 0:
+    if u.hp > 0 and u.team != unit.team and manhattanDist(pos, u.battlePos) == 1 and u.battleAttacksInit > 0:
       if reality or u.isVisible(unit.team):
         count += 1
         if count == 2:
@@ -1697,6 +1704,14 @@ proc drawBattle(self: Battle) =
   setSpritesheet(0)
   for trap in knownTraps:
     spr(26, cx + trap.x * 16 + 8 - 4, cy + trap.y * 16 + 8 - 4)
+  #for p in knownEnterForests:
+  #  if p[1] != 1:
+  #    let pos = p[0]
+  #    spr(27, cx + pos.x * 16 + 8 - 4, cy + pos.y * 16 + 8 - 4)
+  #for p in knownExitForests:
+  #  if p[1] != 1:
+  #    let pos = p[0]
+  #    spr(28, cx + pos.x * 16 + 8 - 4, cy + pos.y * 16 + 8 - 4)
 
   # draw units
   for u in units:
@@ -1709,19 +1724,33 @@ proc drawBattle(self: Battle) =
         setColor(27)
         circfill(u.pos.x + 7, u.pos.y + 8, 1)
 
-  if hoverUnit != nil and hoverUnit.team != 1:
-    let moves = calculatePossibleMoveAttacks(hoverUnit, false)
+  if hoverUnit != nil and hoverUnit.team != 1 and hoverChangeTime < time - 0.6:
     # show enemy unit's possible moves
-    setColor(27)
-    if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
-    for move in moves:
-      let x = move[0].x
-      let y = move[0].y
-      if move[1]:
-        circ(cx + x * 16 + 8, cy + y * 16 + 8, 3)
-      else:
-        rrect(cx + x * 16 + 2, cy + y * 16 + 2, cx + x * 16 + 13, cy + y * 16 + 13)
+    # TODO: optimise
+    # TODO: show attacks
+    let moves = self.dijkstra(hoverUnit.battlePos, 99999, hoverUnit, false)
+    ditherPatternBigCheckerboard2()
+    setSpritesheet(3)
+    pal(21,27)
+    let moveDist = hoverUnit.moveDist * hoverUnit.battleMovesInit
+    for k,move in moves:
+      if move[0] <= moveDist:
+        let pos = k
+        let x = pos.x
+        let y = pos.y
+        var edges = 0
+        if pos.x == 0 or moves[pos + vec2i(-1,0)][0] > moveDist:
+          edges = edges or 1
+        if pos.x == width - 1 or moves[pos + vec2i(1,0)][0] > moveDist:
+          edges = edges or 2
+        if pos.y == 0 or moves[pos + vec2i(0,-1)][0] > moveDist:
+          edges = edges or 4
+        if pos.y == height - 1 or moves[pos + vec2i(0,1)][0] > moveDist:
+          edges = edges or 8
+        if edges > 0:
+          spr(47+edges, cx + pos.x * 16, cy + pos.y * 16)
     ditherPattern()
+    pal()
 
   if unitsToDeploy.len > 0:
     if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
@@ -1760,7 +1789,6 @@ proc drawBattle(self: Battle) =
               edges = edges or 4
             if pos.y == height - 1 or selectedUnitMoves[pos + vec2i(0,1)][0] > selectedUnit.moveDist:
               edges = edges or 8
-
             if edges > 0:
               spr(47+edges, cx + pos.x * 16, cy + pos.y * 16)
             ditherPattern()
@@ -1772,15 +1800,13 @@ proc drawBattle(self: Battle) =
 
     if selectedUnit.battleAttacks > 0:
       # draw possible attacks
-      setColor(27)
       for u in units:
         if u.team != selectedUnit.team and u.isVisible(selectedUnit.team):
           if selectedUnit.canAttack(u.battlePos):
-            if frame mod 60 < 30: ditherPatternCheckerboard() else: ditherPatternCheckerboard2()
             let x = u.battlePos.x
             let y = u.battlePos.y
-            rrect(cx + x * 16, cy + y * 16, cx + x * 16 + 15, cy + y * 16 + 15)
-            ditherPattern()
+            pal(21,27)
+            spr(63, cx + x * 16, cy + y * 16, 1, 1, frame mod 30 < 15)
 
 
 proc draw(self: Site, x,y: int) =
@@ -2293,6 +2319,8 @@ proc startTurn() =
 
   for battle in battles:
     battle.knownTraps = @[]
+    battle.knownExitForests.keepItIf(it[1] != 1)
+    battle.knownEnterForests.keepItIf(it[1] != 1)
     battle.teamTurn = 1
     for u in battle.units:
       u.battleMoves = u.battleMovesInit
@@ -2369,23 +2397,24 @@ proc startTurn() =
 
   if currentDestiny == nil:
     # draw one destiny card
-    var c = destinyPile.drawCard()
-    if c == nil:
-      age += 1
-      if age > 3:
-        age = 3
-      fillDestiny()
+    if destinyPile != nil:
+      var c = destinyPile.drawCard()
+      if c == nil:
+        age += 1
+        if age > 3:
+          age = 3
+        fillDestiny()
 
-      c = destinyPile.drawCard()
+        c = destinyPile.drawCard()
 
-    if c != nil:
-      moveCard(c, vec2f(screenWidth div 4 + 10, screenHeight - cardHeight - 2), 0) do(cm: CardMove):
-        currentDestiny = c
-        let ds = currentDestiny.settings.DestinyCardSettings
-        if ds.onStartTurn != nil:
-          for town in towns:
-            if town.team == 1:
-              ds.onStartTurn(currentDestiny, town)
+      if c != nil:
+        moveCard(c, vec2f(screenWidth div 4 + 10, screenHeight - cardHeight - 2), 0) do(cm: CardMove):
+          currentDestiny = c
+          let ds = currentDestiny.settings.DestinyCardSettings
+          if ds.onStartTurn != nil:
+            for town in towns:
+              if town.team == 1:
+                ds.onStartTurn(currentDestiny, town)
 
 
 
@@ -2404,6 +2433,8 @@ proc endTurn() =
 
   for battle in battles:
     battle.knownTraps = @[]
+    battle.knownExitForests.keepItIf(it[1] == 1)
+    battle.knownEnterForests.keepItIf(it[1] == 1)
     battle.teamTurn = 2
 
     var playerUnits = 0
@@ -2441,106 +2472,106 @@ proc endTurn() =
               u.battlePos = vec2i(x,y)
               battle.units.add(u)
 
+  if not skirmishMode:
+    if currentDestiny != nil:
+      let ds = currentDestiny.settings.DestinyCardSettings
+      if ds.sicknessSpreads:
+        for town in towns:
+          # spread sickness
+          var nSick = town.getSickCount()
+          if nSick > 0:
+            echo town.name, " Sickness spreads: ", nSick
+            for i in 0..<nSick:
+              # convert a follower or soldier to sick
+              let target = town.randomUnit() do(x: Unit) -> bool: x.kind == Follower or x.kind == Soldier
+              if target != nil:
+                  target.setKind(Sick)
 
-  if currentDestiny != nil:
-    let ds = currentDestiny.settings.DestinyCardSettings
-    if ds.sicknessSpreads:
-      for town in towns:
-        # spread sickness
-        var nSick = town.getSickCount()
-        if nSick > 0:
-          echo town.name, " Sickness spreads: ", nSick
-          for i in 0..<nSick:
-            # convert a follower or soldier to sick
-            let target = town.randomUnit() do(x: Unit) -> bool: x.kind == Follower or x.kind == Soldier
-            if target != nil:
-                target.setKind(Sick)
+      # TODO fix rebels move
+      if ds.rebelsMove:
+        for town in towns:
+          for site in town.sites:
+            var rebels: seq[Unit] = @[]
+            for u in site.units:
+              if u.kind == Rebel:
+                rebels.add(u)
+            for u in rebels:
+              u.move(town.randomSite())
 
-    # TODO fix rebels move
-    if ds.rebelsMove:
-      for town in towns:
-        for site in town.sites:
-          var rebels: seq[Unit] = @[]
+    for town in towns:
+      # remove statuses
+      for site in town.sites:
+        if site.disabled > 0:
+          site.disabled -= 1
+        if site.blocked > 0:
+          site.blocked -= 1
+
+
+    if currentDestiny != nil:
+      let ds = currentDestiny.settings.DestinyCardSettings
+      if ds.onEndTurn != nil:
+        for town in towns:
+          if town.team == 1:
+            ds.onEndTurn(currentDestiny, town)
+
+    if homeTown.serpentSouls >= 100:
+      dialogYesNo("THE SERPENT GOD HAS BEEN SUMMONED!") do:
+        mainMenu = true
+      return
+
+    if homeTotem.settings != siteSerpent and homeTotem.settings != siteSerpent2 and homeTotem.settings != siteSerpent3:
+      dialogYesNo("Your cult has been destroyed") do:
+        mainMenu = true
+      return
+
+    # mark all sites as unused
+    # reset actions
+    # for every rebel, increase rebellion
+    for army in armies:
+      army.moved = false
+
+    for town in towns:
+      for site in town.sites:
+        site.used = false
+
+        for u in site.units:
+          u.usedAbility = false
+        # kill a rebel for each soldier on site
+        var nSoldiers = site.getSoldierCount()
+        var nRebels = site.getRebelCount()
+        for i in 0..<nSoldiers:
+          site.removeRebel()
+        for i in 0..<nRebels:
+          if site.removeSoldier() == nil:
+            discard site.removeFollower()
+
+      for site in town.sites:
+        if site.settings != siteRebelBase:
+          var nRebels = 0;
           for u in site.units:
             if u.kind == Rebel:
-              rebels.add(u)
-          for u in rebels:
-            u.move(town.randomSite())
+              nRebels += 1
+          if nRebels >= 5:
+            # if 5 rebels on a site, demolish structure, then build rebel base
+            if site.settings != siteEmpty:
+              site.settings = siteEmpty
+            else:
+              site.settings = siteRebelBase
 
-  for town in towns:
-    # remove statuses
-    for site in town.sites:
-      if site.disabled > 0:
-        site.disabled -= 1
-      if site.blocked > 0:
-        site.blocked -= 1
+      # for every 2 rebellion, make a new rebel
+      let newRebels = clamp(town.rebellion div 5, 0, 3 + town.size)
+      for i in 0..<newRebels:
+        # pick a random site and spawn a rebel
+        let randomSite = rnd(town.sites)
+        randomSite.units.add(newUnit(Rebel, randomSite))
+        #town.rebellion -= 1
 
+      town.rebellion = clamp(town.rebellion, 0, town.sites.len * 5)
 
-  if currentDestiny != nil:
-    let ds = currentDestiny.settings.DestinyCardSettings
-    if ds.onEndTurn != nil:
-      for town in towns:
-        if town.team == 1:
-          ds.onEndTurn(currentDestiny, town)
-
-  if homeTown.serpentSouls >= 100:
-    dialogYesNo("THE SERPENT GOD HAS BEEN SUMMONED!") do:
-      mainMenu = true
-    return
-
-  if homeTotem.settings != siteSerpent and homeTotem.settings != siteSerpent2 and homeTotem.settings != siteSerpent3:
-    dialogYesNo("Your cult has been destroyed") do:
-      mainMenu = true
-    return
-
-  # mark all sites as unused
-  # reset actions
-  # for every rebel, increase rebellion
-  for army in armies:
-    army.moved = false
-
-  for town in towns:
-    for site in town.sites:
-      site.used = false
-
-      for u in site.units:
-        u.usedAbility = false
-      # kill a rebel for each soldier on site
-      var nSoldiers = site.getSoldierCount()
-      var nRebels = site.getRebelCount()
-      for i in 0..<nSoldiers:
-        site.removeRebel()
-      for i in 0..<nRebels:
-        if site.removeSoldier() == nil:
-          discard site.removeFollower()
-
-    for site in town.sites:
-      if site.settings != siteRebelBase:
-        var nRebels = 0;
-        for u in site.units:
-          if u.kind == Rebel:
-            nRebels += 1
-        if nRebels >= 5:
-          # if 5 rebels on a site, demolish structure, then build rebel base
-          if site.settings != siteEmpty:
-            site.settings = siteEmpty
-          else:
-            site.settings = siteRebelBase
-
-    # for every 2 rebellion, make a new rebel
-    let newRebels = clamp(town.rebellion div 5, 0, 3 + town.size)
-    for i in 0..<newRebels:
-      # pick a random site and spawn a rebel
-      let randomSite = rnd(town.sites)
-      randomSite.units.add(newUnit(Rebel, randomSite))
-      #town.rebellion -= 1
-
-    town.rebellion = clamp(town.rebellion, 0, town.sites.len * 5)
-
-    # cap site
-    for site in town.sites:
-      if site.units.len > 15:
-        site.units.setLen(15)
+      # cap site
+      for site in town.sites:
+        if site.units.len > 15:
+          site.units.setLen(15)
 
   phaseTimer = 0.5
 
@@ -2661,10 +2692,11 @@ proc newGame() =
 
   turnPhase = phaseTurn
 
+  skirmishMode = false
 
   battles = @[]
 
-  currentBattle = newBattle(2,2,8,8)
+  currentBattle = newBattle(2,2,16,12)
 
   battles.add(currentBattle)
 
@@ -2731,6 +2763,37 @@ proc newGame() =
               site = newSite(town, siteHovel, i mod town.width, i div town.width)
 
         towns.add(town)
+
+  startTurn()
+
+proc newGameSkirmish(w,h: int) =
+  srand()
+
+  skirmishMode = true
+
+  currentDestiny = nil
+  turnPhase = phaseTurn
+  battles = @[]
+  currentBattle = newBattle(2,2,w,h)
+  battles.add(currentBattle)
+
+  age = 0
+  particles = @[]
+  towns = @[]
+  armies = @[]
+
+  destinyPile = newPile("Destiny", pkAllFaceDown)
+  destinyPile.pos = vec2i(2, screenHeight - cardHeight - 2)
+  destinyDiscardPile = newPile("Destiny Discard", pkHidden)
+  destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
+  cardHand = newPile("Hand", pkAllFaceOpen)
+  cardHand.pos = vec2i(2,3)
+
+  turn = 0
+  time = 0.0
+  frame = 0
+
+  loadMap(0, "map.json")
 
   startTurn()
 
@@ -2804,6 +2867,60 @@ proc save(self: Town, f: FileStream) =
   for site in sites:
     site.save(f)
 
+proc save(self: Army, f: FileStream) =
+  f.write(pos.x.uint8)
+  f.write(pos.y.uint8)
+  f.write(team.uint8)
+  f.write(units.len.uint16)
+  for unit in units:
+    unit.save(f)
+
+proc loadArmy(f: FileStream): Army =
+  result = new(Army)
+  result.pos.x = f.readUint8().int
+  result.pos.y = f.readUint8().int
+  result.team = f.readUint8().int
+  let nUnits = f.readUint16().int
+  result.units = @[]
+  for i in 0..<nUnits:
+    let u = f.loadUnit()
+    result.units.add(u)
+
+proc save(self: Battle, f: FileStream) =
+  f.write(pos.x.uint8)
+  f.write(pos.y.uint8)
+  f.write(age.uint8)
+  f.write(width.uint8)
+  f.write(height.uint8)
+  f.write(completed.uint8)
+  f.write(victor.uint8)
+
+  for i in 0..<map.len:
+    f.write(map[i].uint8)
+
+  f.write(units.len.uint16)
+  for unit in units:
+    unit.save(f)
+
+proc loadBattle(f: FileStream): Battle =
+  result = new(Battle)
+  result.pos.x = f.readUint8().int
+  result.pos.y = f.readUint8().int
+  result.age = f.readUint8().int
+  result.width = f.readUint8().int
+  result.height = f.readUint8().int
+  result.completed = f.readUint8().bool
+
+  result.map = newSeq[int](result.width * result.height)
+
+  for i in 0..<result.width * result.height:
+    result.map[i] = f.readUint8().int
+
+  var nUnits = f.readUint16().int
+  for i in 0..<nUnits:
+    var u = f.loadUnit()
+    result.units.add(u)
+
 proc save(self: Card, f: FileStream) =
   # look up index of card in destinySettings
   let ds = settings.DestinyCardSettings
@@ -2852,25 +2969,43 @@ proc saveGame() =
 
   var f = openFileStream(saveFileTmp, fmWrite)
   f.write("SerpentsSave")
+  # save if skirmish mode or not
+  f.write(skirmishMode.uint8)
+
   # globals
-  f.write(age.uint8)
-  f.write(turn.uint16)
-  f.write(guideMode.uint8)
-  f.write(guideStep.uint8)
-  # save the state of the destinyPile
-  f.write(destinyPile.len.uint16)
-  for c in destinyPile:
-    c.save(f)
-  # save the discardPile
-  f.write(destinyDiscardPile.len.uint16)
-  for c in destinyDiscardPile:
-    c.save(f)
-  # save currentDestiny
-  currentDestiny.save(f)
-  # go through each town and save it
-  f.write(towns.len.uint8)
-  for town in towns:
-    town.save(f)
+  if not skirmishMode:
+    f.write(age.uint8)
+    f.write(turn.uint16)
+
+    f.write(guideMode.uint8)
+    f.write(guideStep.uint8)
+
+    # save the state of the destinyPile
+    f.write(destinyPile.len.uint16)
+    for c in destinyPile:
+      c.save(f)
+    f.write(destinyDiscardPile.len.uint16)
+    for c in destinyDiscardPile:
+      c.save(f)
+    # save currentDestiny
+    if currentDestiny != nil:
+      f.write(1.uint16)
+      currentDestiny.save(f)
+    else:
+      f.write(0.uint16)
+    # go through each town and save it
+    f.write(towns.len.uint8)
+    for town in towns:
+      town.save(f)
+
+    f.write(armies.len.uint16)
+    for army in armies:
+      army.save(f)
+
+  f.write(battles.len.uint16)
+  for battle in battles:
+    battle.save(f)
+
   f.close()
 
   if fileExists(saveFileOld):
@@ -2894,48 +3029,64 @@ proc loadGame(): bool =
   if magic != "SerpentsSave":
     echo "This is not a SerpentsSave game"
     return false
-  # globals
-  age = f.readUint8().int
-  turn = f.readUint16().int
-  guideMode = f.readUint8().bool
-  guideStep = f.readUint8().int
-  # load cards
-  clearCardMoves()
 
-  destinyPile = newPile("Destiny", pkAllFaceDown)
-  destinyPile.pos = vec2i(2, screenHeight - cardHeight - 2)
+  skirmishMode = f.readUint8().bool
 
-  let nDestiny = f.readUint16().int
-  for i in 0..<nDestiny:
-    let c = f.loadCard()
-    destinyPile.add(c)
+  if not skirmishMode:
+    # globals
+    age = f.readUint8().int
+    turn = f.readUint16().int
+    guideMode = f.readUint8().bool
+    guideStep = f.readUint8().int
+    # load cards
+    clearCardMoves()
 
-  destinyDiscardPile = newPile("Destiny Discard", pkHidden)
-  destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
+    destinyPile = newPile("Destiny", pkAllFaceDown)
+    destinyPile.pos = vec2i(2, screenHeight - cardHeight - 2)
 
-  let nDestinyDiscard = f.readUint16().int
-  for i in 0..<nDestinyDiscard:
-    let c = f.loadCard()
-    destinyDiscardPile.add(c)
-  currentDestiny = f.loadCard()
-  currentDestiny.pos = vec2f(screenWidth div 4 + 10, screenHeight - cardHeight - 2)
-  # go through each town and load it
-  var nTowns = f.readUint8().int
-  towns = @[]
-  homeTown = nil
-  homeTotem = nil
-  for i in 0..<nTowns:
-    var town = f.loadTown()
-    towns.add(town)
-    if town.isHometown:
-      currentTown = town
-      homeTown = town
-      for site in town.sites:
-        if site.settings == siteSerpent or site.settings == siteSerpent2 or site.settings == siteSerpent3:
-          homeTotem = site
-  if homeTown == nil or homeTotem == nil:
-    echo "couldn't find hometown or totem"
-    return false
+    let nDestiny = f.readUint16().int
+    for i in 0..<nDestiny:
+      let c = f.loadCard()
+      destinyPile.add(c)
+
+    destinyDiscardPile = newPile("Destiny Discard", pkHidden)
+    destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
+
+    let nDestinyDiscard = f.readUint16().int
+    for i in 0..<nDestinyDiscard:
+      let c = f.loadCard()
+      destinyDiscardPile.add(c)
+    currentDestiny = f.loadCard()
+    currentDestiny.pos = vec2f(screenWidth div 4 + 10, screenHeight - cardHeight - 2)
+    # go through each town and load it
+    var nTowns = f.readUint8().int
+    towns = @[]
+    homeTown = nil
+    homeTotem = nil
+    for i in 0..<nTowns:
+      var town = f.loadTown()
+      towns.add(town)
+      if town.isHometown:
+        currentTown = town
+        homeTown = town
+        for site in town.sites:
+          if site.settings == siteSerpent or site.settings == siteSerpent2 or site.settings == siteSerpent3:
+            homeTotem = site
+    if homeTown == nil or homeTotem == nil:
+      echo "couldn't find hometown or totem"
+      return false
+
+    armies = @[]
+    var nArmies = f.readUint16().int
+    for i in 0..<nArmies:
+      var army = f.loadArmy()
+      armies.add(army)
+
+  var nBattles = f.readUint16().int
+  for i in 0..<nBattles:
+    var battle = f.loadBattle()
+    battles.add(battle)
+
   return true
 
 proc saveUndo() =
@@ -3054,6 +3205,11 @@ proc mainMenuGui() =
         guideMode = true
         newGame()
 
+      if G.button("Skirmish"):
+        gameStarted = true
+        mainMenu = false
+        newGameSkirmish(8,8)
+
       if G.button("Continue", saveExists):
         if loadGame():
           gameStarted = true
@@ -3088,14 +3244,16 @@ proc gameGuiBattle(self: Battle) =
       tryEndTurn()
     if G.hoverElement == G.element or G.downElement == G.element:
       hoveringOverEndTurn = true
-    else:
-      G.empty(100, 28)
   else:
     discard G.button(100, 28, false, K_UNKNOWN) do(x,y,w,h: int, enabled: bool):
       pal(29,0)
       spr(48 + ((frame div 5).int mod 4) * 2, x + w div 2 - 8, y, 2, 2)
       pal()
-    discard G.button($turnPhase, 148, 28, false)
+
+  if G.button("<21>S</>tealth: " & (if stealthMode: "ON" else: "OFF"), 100, 28, true, K_S):
+    stealthMode = not stealthMode
+    if selectedUnit != nil:
+      selectedUnitMoves = self.dijkstra(selectedUnit.battlePos, 99999, selectedUnit, false)
 
   G.endArea()
 
@@ -3465,19 +3623,23 @@ proc gameGui() =
 
   # draw cards and piles
 
-  destinyPile.pos = vec2i(2, screenHeight - cardHeight - 2)
-  destinyPile.draw()
-  destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
-  destinyDiscardPile.draw()
+  if not skirmishMode:
+    if destinyPile != nil:
+      destinyPile.pos = vec2i(2, screenHeight - cardHeight - 2)
+      destinyPile.draw()
+    if destinyDiscardPile != nil:
+      destinyDiscardPile.pos = vec2i(screenWidth div 4 + 5, screenHeight + 10)
+      destinyDiscardPile.draw()
 
-  if currentDestiny != nil and currentTown != nil:
-    currentDestiny.draw()
+    if currentDestiny != nil and currentTown != nil:
+      currentDestiny.draw()
 
-  if cardHand.len > 0:
-    for c in cardHand:
-      c.draw()
+    if cardHand != nil:
+      if cardHand.len > 0:
+        for c in cardHand:
+          c.draw()
 
-  drawCards()
+    drawCards()
 
   if mainMenu:
     mainMenuGui()
@@ -3611,6 +3773,9 @@ proc move(self: Battle, unit: Unit, dest: Vec2i, moveType: BattleMoveType, delay
 
 proc checkForTrap(self: Battle, unit: Unit) =
   if isTrap(unit, unit.battlePos, true):
+    for u in units:
+      if u.hp > 0 and u.team != unit.team and manhattanDist(pos, u.battlePos) == 1 and u.battleAttacksInit > 0:
+        u.flash = 5
     newParticleText(unit.pos, vec2f(0,-10), 1.0, "Trap!", 27, 27)
     if unit.team == teamTurn:
       knownTraps.add(unit.battlePos)
@@ -3655,12 +3820,10 @@ proc attack(self: Battle, attacker, defender: Unit) =
       move(attacker, defender.battlePos, bmAttack, 0) do(unit: Unit):
         newParticleText(defender.pos, vec2f(0,-10), 1.0, "Rout!", 27, 27)
         defender.hp -= 1
-        pauseTimer = max(pauseTimer, 2.0)
     else:
       newParticleDest(attacker.pos, defender.pos, 0.25, 0, 80, 82)
       newParticleText(defender.pos, vec2f(0,-10), 1.0, "Rout!", 27, 27)
       defender.hp -= 1
-      pauseTimer = max(pauseTimer, 1.0)
 
   attacker.battleAttacks -= 1
   if direct:
@@ -3678,32 +3841,37 @@ proc battleUpdateCommon(self: Battle, dt: float32) =
       echo "0 length path! wtf"
       moves.delete(0)
     elif move.time <= 0:
-      echo "start move ", (move.index+1), "/", move.path.len
+      #echo "start move ", (move.index+1), "/", move.path.len
       move.unit.revealed = false
       move.lastPos = move.unit.battlePos
       move.unit.battlePos = move.path[move.index]
       move.time = 0.1
+      # if leaving forest, reveal early
+      if mget(move.unit.battlePos) != 3:
+        checkIfHidden(move.unit)
     elif move.time > 0:
       # move in progress
       move.time -= dt
       if move.time <= 0:
-        echo "move step completed ", (move.index+1), "/", move.path.len, " ", move.moveType, " team: ", move.unit.team
+        #echo "move step completed ", (move.index+1), "/", move.path.len, " ", move.moveType, " team: ", move.unit.team
         # step completed
+        if mget(move.lastPos) != 3 and mget(move.unit.battlePos) == 3:
+          knownEnterForests.add((move.unit.battlePos, move.unit.team))
+        elif mget(move.lastPos) == 3 and mget(move.unit.battlePos) != 3:
+          knownExitForests.add((move.lastPos, move.unit.team))
         checkIfHidden(move.unit)
         # check if we stepped into a hidden enemy, will never happen during attack? (could happen with direct attacks of more than one distance)
         if move.moveType != bmAttack:
           for u in units:
             if u.team != move.unit.team and u.battlePos == move.unit.battlePos:
-              echo "surprised"
               newParticleText(move.unit.pos, vec2f(0,-10), 1.0, "Surprise!", 27, 27)
               move.unit.battleMoves = 0
               move.unit.battleAttacks = 0
-              pauseTimer = max(pauseTimer, 1.0)
               move.index = move.path.high
-              self.move(move.unit, move.lastPos, bmRetreat, 0.5)
+              self.move(move.unit, move.lastPos, bmRetreat, 0.0)
               break
         if move.unit.hp > 0 and move.index < move.path.high:
-          echo "next step"
+          #echo "next step"
           move.unit.revealed = false
           move.time = 0.1
           move.index += 1
@@ -3711,7 +3879,7 @@ proc battleUpdateCommon(self: Battle, dt: float32) =
           move.unit.battlePos = move.path[move.index]
           checkIfHidden(move.unit)
         else:
-          echo "was last step"
+          #echo "was last step"
           moveCompleted = true
           if move.onComplete != nil:
             move.onComplete(move.unit)
@@ -3733,10 +3901,11 @@ proc battleUpdateCommon(self: Battle, dt: float32) =
       newParticle(u.pos, vec2f(0,0), 0.25, 0, 16, 19)
   units.keepItIf(it.hp > 0)
 
-  for i in 0..<units.len:
-    for j in i+1..<units.len:
-      if units[i].battlePos == units[j].battlePos:
-        echo "problem! two units on same space!", units[i].battlePos
+  if moves.len == 0:
+    for i in 0..<units.len:
+      for j in i+1..<units.len:
+        if units[i].battlePos == units[j].battlePos:
+          echo "problem! two units on same space!", units[i].battlePos
 
 
 proc battleUpdate(self: Battle, dt: float32) =
@@ -3829,6 +3998,9 @@ proc battleUpdate(self: Battle, dt: float32) =
 
 proc manhattanDist(a, b: Vec2i): int =
   return abs(a.x - b.x) + abs(a.y - b.y)
+
+proc shareAxis(a, b: Vec2i): bool =
+  a.x == b.x or a.y == b.y
 
 proc calculatePossibleMoves(self: Battle, u: Unit, reality = true): seq[(Vec2i,bool)] =
   # get all possible moves
@@ -3971,6 +4143,7 @@ proc calculateMove(self: Battle, u: Unit): (Vec2i,float32) =
     return (bestPos,bestScore)
 
   else:
+    # TODO: move somewhere towards nearest enemy
     var bestPos = u.battlePos
     var bestScore = float32.low
     for ao in possibleAttackOrigins:
@@ -4069,7 +4242,7 @@ proc battleEndTurn(self: Battle, dt: float32): bool =
 
       if u.battleAttacks > 0:
         for u2 in units:
-          if u2.team != u.team:
+          if u2.team != u.team and u2.isVisible(u.team):
             if u.canAttack(u2.battlePos):
               let score = self.scorePosition(u, u.battlePos, u2)
               if score > bestScore:
@@ -4449,14 +4622,14 @@ proc gameDrawGame() =
   elif currentTown != nil:
     currentTown.draw()
 
-  drawWorldMap()
+  if not skirmishMode:
+    drawWorldMap()
 
 
-  setColor(15)
-  vline(screenWidth div 4, 0, screenHeight - 1)
+    setColor(15)
+    vline(screenWidth div 4, 0, screenHeight - 1)
 
   setSpritesheet(0)
-
   setCamera()
 
   # particles
